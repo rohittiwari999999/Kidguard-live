@@ -193,9 +193,36 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
                   border: Border.all(color: Colors.white24),
                 ),
                 child: _isSharing
-                    ? RTCVideoView(_localRenderer)
+                    ? Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const Icon(Icons.screen_share, size: 72, color: Colors.greenAccent),
+                            const SizedBox(height: 16),
+                            const Text(
+                              '🔴 स्क्रीन लाइव शेयर हो रही है!\nScreen is Live Broadcasting',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
+                            ),
+                            const SizedBox(height: 12),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                              decoration: BoxDecoration(
+                                color: Colors.green.withOpacity(0.2),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: Colors.greenAccent),
+                              ),
+                              child: const Text(
+                                'अब आप कोई भी ऐप (YouTube, Game) चलाएं,\nमाता-पिता के फोन पर लाइव दिखता रहेगा।',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(color: Colors.greenAccent, fontSize: 13),
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
                     : const Center(
-                        child: Text('स्क्रीन शेयरिंग अभी बंद है\nStart Screen Share बटन दबाएं', textAlign: TextAlign.center),
+                        child: Text('स्क्रीन शेयरिंग अभी बंद है\n"स्क्रीन शेयर शुरू करें" बटन दबाएं', textAlign: TextAlign.center),
                       ),
               ),
             ),

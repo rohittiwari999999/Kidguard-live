@@ -51,6 +51,26 @@ export const ChildView: React.FC<ChildViewProps> = ({
   const [copied, setCopied] = useState(false);
   const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string>('');
   const [showQrModal, setShowQrModal] = useState(false);
+  const [broadcastSeconds, setBroadcastSeconds] = useState(0);
+
+  // Live timer for real screen broadcasting
+  useEffect(() => {
+    let timer: any;
+    if (isStreaming && streamSource === 'real_screen') {
+      timer = setInterval(() => {
+        setBroadcastSeconds((prev) => prev + 1);
+      }, 1000);
+    } else {
+      setBroadcastSeconds(0);
+    }
+    return () => clearInterval(timer);
+  }, [isStreaming, streamSource]);
+
+  const formatTimer = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
 
   // Security lock PIN
   const [pin, setPin] = useState('1234');
@@ -193,11 +213,9 @@ export const ChildView: React.FC<ChildViewProps> = ({
       }
 
       activeStreamRef.current = screenStream;
-      if (videoPreviewRef.current) {
-        videoPreviewRef.current.srcObject = screenStream;
-        videoPreviewRef.current.muted = true;
-        videoPreviewRef.current.play().catch(() => {});
-      }
+      // Do NOT attach screenStream to local videoPreviewRef!
+      // Attaching the screen capture to a video element on that same screen creates
+      // an infinite feedback loop that causes Android Chrome to crash or run out of GPU memory!
 
       const videoTrack = screenStream.getVideoTracks()[0];
       if (videoTrack) {
@@ -602,15 +620,52 @@ export const ChildView: React.FC<ChildViewProps> = ({
                 isStreaming={isStreaming}
               />
             </div>
+          ) : streamSource === 'real_screen' && isStreaming ? (
+            /* Crash-Proof Broadcasting Active Card for Mobile */
+            <div className="p-6 bg-gradient-to-br from-slate-900 via-indigo-950/40 to-slate-950 border-2 border-emerald-500/50 rounded-2xl shadow-2xl text-center space-y-4 relative overflow-hidden">
+              <div className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-mono font-bold animate-pulse">
+                <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+                <span>{formatTimer(broadcastSeconds)}</span>
+              </div>
+
+              <div className="relative w-20 h-20 mx-auto flex items-center justify-center mt-2">
+                <div className="absolute inset-0 rounded-full bg-emerald-500/20 animate-ping" />
+                <div className="w-16 h-16 rounded-full bg-emerald-500/25 border-2 border-emerald-400 flex items-center justify-center text-emerald-300 shadow-lg shadow-emerald-500/30">
+                  <Cast className="w-8 h-8 animate-pulse" />
+                </div>
+              </div>
+
+              <div>
+                <h3 className="text-lg font-bold text-white tracking-tight">
+                  {lang === 'hi' ? '🔴 आपकी स्क्रीन लाइव प्रसारित हो रही है' : '🔴 Screen is Broadcasting Live'}
+                </h3>
+                <p className="text-xs text-emerald-300/90 font-mono mt-1">
+                  {lang === 'hi'
+                    ? `पेयरिंग कोड: ${roomCode} • माता-पिता के फोन पर लाइव दिख रही है`
+                    : `Room: ${roomCode} • Live on Parent Phone`}
+                </p>
+              </div>
+
+              <div className="p-3 bg-slate-950/80 rounded-xl border border-slate-800 text-xs text-slate-300 flex items-center justify-center gap-2 max-w-md mx-auto">
+                <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>
+                  {lang === 'hi'
+                    ? 'सुरक्षित WebRTC स्ट्रीम: आपका स्क्रीन वीडियो सीधे माता-पिता के फोन पर भेजा जा रहा है।'
+                    : 'End-to-End Secure: Screen video is streaming directly to the paired parent device.'}
+                </span>
+              </div>
+            </div>
           ) : (
             <div className="relative rounded-2xl overflow-hidden bg-black aspect-video max-h-[340px] flex items-center justify-center border border-slate-800 shadow-inner">
-              <video
-                ref={videoPreviewRef}
-                autoPlay
-                playsInline
-                muted
-                className="w-full h-full object-contain"
-              />
+              {streamSource === 'camera' && (
+                <video
+                  ref={videoPreviewRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-full h-full object-contain"
+                />
+              )}
               {!isStreaming && (
                 <div className="absolute inset-0 bg-slate-950/85 backdrop-blur-xs flex flex-col items-center justify-center text-center p-4">
                   {streamInterrupted ? (
@@ -630,7 +685,7 @@ export const ChildView: React.FC<ChildViewProps> = ({
                       </p>
                       <button
                         onClick={handleStartShare}
-                        className="mt-3 px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl transition flex items-center gap-1.5 shadow-lg active:scale-95"
+                        className="mt-3 px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl transition flex items-center gap-1.5 shadow-lg active:scale-95 cursor-pointer"
                       >
                         <RefreshCw className="w-3.5 h-3.5" />
                         <span>{lang === 'hi' ? 'दोबारा स्क्रीन शेयर शुरू करें' : 'Resume Screen Share'}</span>
@@ -640,7 +695,9 @@ export const ChildView: React.FC<ChildViewProps> = ({
                     <>
                       <Cast className="w-10 h-10 text-slate-500 mb-2" />
                       <p className="text-sm font-medium text-slate-300">
-                        {lang === 'hi' ? 'कैमरा या स्क्रीन अभी शुरू नहीं हुई है' : 'Stream is not currently started'}
+                        {streamSource === 'real_screen'
+                          ? (lang === 'hi' ? 'स्क्रीन शेयरिंग अभी शुरू नहीं हुई है' : 'Screen share not started')
+                          : (lang === 'hi' ? 'कैमरा अभी शुरू नहीं हुआ है' : 'Camera not started')}
                       </p>
                       <p className="text-xs text-slate-500 mt-1 max-w-xs">
                         {lang === 'hi'
@@ -708,8 +765,13 @@ export const ChildView: React.FC<ChildViewProps> = ({
                 : 'Point parent phone camera at this QR code to connect to this live screen instantly.'}
             </p>
 
-            <div className="p-3 bg-white rounded-2xl inline-block shadow-inner mx-auto mb-4">
-              <img src={qrCodeDataUrl} alt="Pairing QR Code" className="w-56 h-56 object-contain" />
+            <div className="mx-auto mb-4 flex justify-center">
+              <QRCodeDisplay
+                value={typeof window !== 'undefined' ? `${window.location.origin}${window.location.pathname}?role=parent&room=${roomCode}` : `KIDGUARD:${roomCode}`}
+                roomCode={roomCode}
+                size={180}
+                showDownload={false}
+              />
             </div>
 
             <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 mb-4">

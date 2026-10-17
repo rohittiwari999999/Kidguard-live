@@ -113,7 +113,12 @@ export class PeerManager {
 
   // Child calls Parent with screen stream
   callWithStream(targetPeerId: string, stream: MediaStream) {
-    if (!this.peer || this.peer.destroyed) return;
+    if (!this.peer || this.peer.destroyed || !this.peer.open) return;
+
+    // If call is already active, do not tear it down
+    if (this.currentCall && (this.currentCall as any).open) {
+      return;
+    }
 
     try {
       this.onConnectionStatusCallback?.('connecting');
@@ -127,11 +132,12 @@ export class PeerManager {
       });
 
       call.on('close', () => {
+        this.currentCall = null;
         this.onConnectionStatusCallback?.('disconnected');
       });
 
       call.on('error', () => {
-        // Safe offline handler
+        this.currentCall = null;
         this.onConnectionStatusCallback?.('disconnected');
       });
 

@@ -424,9 +424,24 @@ export const ParentView: React.FC<ParentViewProps> = ({
               </div>
             )}
 
+            {/* Live Video Sync Button for mobile browsers */}
+            {hasStream && (
+              <button
+                onClick={() => {
+                  if (videoRef.current) {
+                    videoRef.current.play().catch(() => {});
+                  }
+                }}
+                className="absolute bottom-4 left-4 z-20 px-3 py-1.5 bg-slate-900/80 hover:bg-slate-900 backdrop-blur-md rounded-xl text-white text-xs border border-white/20 transition flex items-center gap-1.5 shadow-lg active:scale-95 cursor-pointer"
+              >
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                <span>{lang === 'hi' ? 'लाइव सिंक' : 'Sync Live'}</span>
+              </button>
+            )}
+
             {/* Floating Top Status (When Live) */}
             {hasStream && (
-              <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none">
+              <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none z-10">
                 <div className="flex items-center gap-2 bg-black/60 backdrop-blur-md px-3 py-1 rounded-full border border-white/10 text-white text-xs pointer-events-auto">
                   <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
                   <span className="font-bold tracking-wider text-[11px] text-red-400 uppercase">LIVE</span>
