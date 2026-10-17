@@ -110,26 +110,33 @@ export const ParentView: React.FC<ParentViewProps> = ({
     const code = (codeToJoin || inputCode).trim().toUpperCase();
     if (!code) return;
 
+    // If local stream is already active (like in SplitDemo preview), use it directly
+    if (activeLocalStream) {
+      if (videoRef.current) {
+        videoRef.current.srcObject = activeLocalStream;
+      }
+      setHasStream(true);
+      setConnectionStatus('connected');
+      return;
+    }
+
     setConnectionStatus('connecting');
     setConnectedRoom(code);
 
     const parentPeerId = `kg-${code}-parent`;
-    const childPeerId = `kg-${code}-child`;
 
     peerManager.initPeer(
       parentPeerId,
       () => {
-        console.log('Parent Peer ready, connecting to child:', childPeerId);
-        // Connect data channel
-        peerManager.connectData(childPeerId);
+        // Parent Peer is open and waiting for child to stream
+        setConnectionStatus('connecting');
       },
-      (err) => {
-        console.warn('Parent Peer error:', err);
+      () => {
+        setConnectionStatus('disconnected');
       }
     );
 
     peerManager.onStream((remoteStream) => {
-      console.log('Received remote stream from child!');
       if (videoRef.current) {
         videoRef.current.srcObject = remoteStream;
       }
@@ -144,21 +151,14 @@ export const ParentView: React.FC<ParentViewProps> = ({
         setHasStream(false);
       }
     });
-
-    // Check if there is an active local stream fallback
-    if (activeLocalStream && videoRef.current) {
-      videoRef.current.srcObject = activeLocalStream;
-      setHasStream(true);
-      setConnectionStatus('connected');
-    }
   };
 
-  // Auto connect if room param is present
+  // Auto connect if room param is present and not local demo
   useEffect(() => {
-    if (defaultRoomCode) {
+    if (defaultRoomCode && !activeLocalStream) {
       handleConnect(defaultRoomCode);
     }
-  }, []);
+  }, [defaultRoomCode, activeLocalStream]);
 
   // Take Snapshot
   const captureScreenshot = () => {

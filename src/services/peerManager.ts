@@ -47,7 +47,7 @@ export class PeerManager {
           { urls: 'stun:stun2.l.google.com:19302' }
         ]
       },
-      debug: 1
+      debug: 0 // Suppress noisy PeerJS internal console warnings for offline peers
     });
 
     this.peer.on('open', (id) => {
@@ -55,8 +55,17 @@ export class PeerManager {
       onReady?.(id);
     });
 
-    this.peer.on('error', (err) => {
-      console.warn('Peer error:', err);
+    this.peer.on('error', (err: any) => {
+      // If target peer is offline or not created yet, it's a standard waiting state
+      if (err && (err.type === 'peer-unavailable' || err.message?.includes?.('Could not connect to peer'))) {
+        this.onConnectionStatusCallback?.('disconnected');
+        return;
+      }
+      if (err && err.type === 'unavailable-id') {
+        // ID temporarily active from recent session
+        return;
+      }
+      console.warn('Peer error handled:', err?.message || err);
       onError?.(err);
     });
 
@@ -115,9 +124,16 @@ export class PeerManager {
   }
 
   connectData(targetPeerId: string) {
-    if (!this.peer) return;
-    const conn = this.peer.connect(targetPeerId);
-    this.setupDataConnection(conn);
+    if (!this.peer || this.peer.destroyed) return;
+    try {
+      const conn = this.peer.connect(targetPeerId, { reliable: true });
+      conn.on('error', () => {
+        // Suppress unhandled peer connection errors when target is offline
+      });
+      this.setupDataConnection(conn);
+    } catch {
+      // ignore
+    }
   }
 
   private setupDataConnection(conn: DataConnection) {

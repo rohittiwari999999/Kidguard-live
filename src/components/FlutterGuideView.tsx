@@ -9,14 +9,16 @@ import {
   Download, 
   ExternalLink, 
   Layers, 
-  FileCode,
-  CheckCircle2,
-  Sparkles,
-  GitBranch,
-  KeyRound,
-  ShieldCheck,
-  Package,
-  Cpu
+  FileCode, 
+  CheckCircle2, 
+  Sparkles, 
+  GitBranch, 
+  KeyRound, 
+  ShieldCheck, 
+  Package, 
+  Cpu,
+  Lock,
+  ArrowRight
 } from 'lucide-react';
 import { Language } from '../types';
 import { translations } from '../utils/i18n';
@@ -25,9 +27,11 @@ interface FlutterGuideViewProps {
   lang: Language;
 }
 
+const PRE_GENERATED_KEYSTORE_BASE64 = `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`;
+
 export const FlutterGuideView: React.FC<FlutterGuideViewProps> = ({ lang }) => {
   const t = translations[lang];
-  const [activeTab, setActiveTab] = useState<'github_action' | 'keystore' | 'gradle' | 'guide' | 'main' | 'pubspec'>('github_action');
+  const [activeTab, setActiveTab] = useState<'secrets_done' | 'github_action' | 'gradle' | 'main' | 'pubspec'>('secrets_done');
   const [copiedFile, setCopiedFile] = useState<string | null>(null);
 
   const copyToClipboard = (text: string, fileName: string) => {
@@ -35,6 +39,37 @@ export const FlutterGuideView: React.FC<FlutterGuideViewProps> = ({ lang }) => {
     setCopiedFile(fileName);
     setTimeout(() => setCopiedFile(null), 2000);
   };
+
+  const secretsList = [
+    {
+      name: 'KEYSTORE_BASE64',
+      value: PRE_GENERATED_KEYSTORE_BASE64,
+      desc: lang === 'hi' ? 'तैयार किया गया RSA 2048 Keystore Base64' : 'Pre-generated Keystore Base64 String',
+      preview: `${PRE_GENERATED_KEYSTORE_BASE64.substring(0, 40)}... (${PRE_GENERATED_KEYSTORE_BASE64.length} chars)`,
+      isLong: true,
+    },
+    {
+      name: 'KEYSTORE_PASSWORD',
+      value: 'KidGuard2026Pass',
+      desc: lang === 'hi' ? 'Keystore स्टोर पासवर्ड' : 'Store Password',
+      preview: 'KidGuard2026Pass',
+      isLong: false,
+    },
+    {
+      name: 'KEY_ALIAS',
+      value: 'upload',
+      desc: lang === 'hi' ? 'Key का Alias' : 'Keystore Alias',
+      preview: 'upload',
+      isLong: false,
+    },
+    {
+      name: 'KEY_PASSWORD',
+      value: 'KidGuard2026Pass',
+      desc: lang === 'hi' ? 'Key का पासवर्ड' : 'Key Password',
+      preview: 'KidGuard2026Pass',
+      isLong: false,
+    },
+  ];
 
   const githubActionsYaml = `# .github/workflows/build-android.yml
 # GitHub Actions Workflow to automatically build Signed APK and AAB for KidGuard
@@ -153,9 +188,13 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
     defaultConfig {
         applicationId "com.example.kidguard_live"
-        minSdkVersion 24       // Android 7.0+ (required for MediaProjection)
+        minSdkVersion 24       // Android 7.0+ (Required for MediaProjection screen capture)
         targetSdkVersion 34    // Android 14
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
@@ -163,10 +202,10 @@ android {
 
     signingConfigs {
         release {
-            keyAlias keystoreProperties['keyAlias']
-            keyPassword keystoreProperties['keyPassword']
-            storeFile keystoreProperties['storeFile'] ? file(keystoreProperties['storeFile']) : null
-            storePassword keystoreProperties['storePassword']
+            keyAlias (System.getenv("KEY_ALIAS") ?: keystoreProperties['keyAlias'])
+            keyPassword (System.getenv("KEY_PASSWORD") ?: keystoreProperties['keyPassword'])
+            storeFile (System.getenv("KEYSTORE_PATH") ? file(System.getenv("KEYSTORE_PATH")) : (keystoreProperties['storeFile'] ? file(keystoreProperties['storeFile']) : null))
+            storePassword (System.getenv("KEYSTORE_PASSWORD") ?: keystoreProperties['storePassword'])
         }
     }
 
@@ -177,344 +216,15 @@ android {
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
-    }
-}
-`;
-
-  const keyPropertiesTemplate = `# android/key.properties
-# NOTE: DO NOT commit this file to public git! GitHub Action creates this automatically.
-storePassword=YOUR_KEYSTORE_PASSWORD
-keyPassword=YOUR_KEY_PASSWORD
-keyAlias=upload
-storeFile=upload-keystore.jks
-`;
-
-  const gitignoreSnippet = `# Add this to your root .gitignore and android/.gitignore:
-android/key.properties
-android/app/upload-keystore.jks
-*.keystore
-*.jks
-`;
-
-  const flutterMainDart = `// lib/main.dart
-// KidGuard Live - Full Flutter Mobile Application
-// Captures Child's Android Screen via MediaProjection and streams to Parent's Phone
-
-import 'package:flutter/material.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'dart:async';
-
-void main() {
-  runApp(const KidGuardApp());
-}
-
-class KidGuardApp extends StatelessWidget {
-  const KidGuardApp({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'KidGuard Live',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF0F172A),
-        colorScheme: const ColorScheme.dark(
-          primary: Color(0xFF4F46E5),
-          secondary: Color(0xFF06B6D4),
-        ),
-      ),
-      home: const RoleSelectionScreen(),
-    );
-  }
-}
-
-class RoleSelectionScreen extends StatelessWidget {
-  const RoleSelectionScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('KidGuard Live - Bal Monitor'),
-        centerTitle: true,
-        backgroundColor: const Color(0xFF1E293B),
-      ),
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Icon(Icons.security, size: 72, color: Color(0xFF6366F1)),
-              const SizedBox(height: 16),
-              const Text(
-                'यह फोन किसका है?\\nSelect Device Role',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 36),
-              ElevatedButton.icon(
-                icon: const Icon(Icons.child_care, size: 28),
-                label: const Text('बच्चे का फोन (Child Device - Broadcast)'),
-                style: ElevatedButton.styleFrom(
-                  minimumSize: const Size.fromHeight(56),
-                  backgroundColor: const Color(0xFF2563EB),
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                ),
-                onPressed: () {
-                  Navigator.push(context, MaterialPageRoute(builder: (_) => const ChildScreenCapture()));
-                },
-              ),
-              const SizedBox(height: 16),
-              ElevatedButton.icon(
-                icon: const Icon(Icons.visibility, size: 28),
-                label: const Text('माता-पिता का फोन (Parent Device - Watch)'),
-                style: ElevatedButton.styleFrom(
-                  minimumSize: const Size.fromHeight(56),
-                  backgroundColor: const Color(0xFF4F46E5),
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                ),
-                onPressed: () {
-                  Navigator.push(context, MaterialPageRoute(builder: (_) => const ParentLiveMonitor()));
-                },
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class ChildScreenCapture extends StatefulWidget {
-  const ChildScreenCapture({super.key});
-
-  @override
-  State<ChildScreenCapture> createState() => _ChildScreenCaptureState();
-}
-
-class _ChildScreenCaptureState extends State<ChildScreenCapture> {
-  final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
-  MediaStream? _screenStream;
-  bool _isSharing = false;
-  String _roomCode = 'KID-8429';
-
-  @override
-  void initState() {
-    super.initState();
-    _localRenderer.initialize();
-  }
-
-  Future<void> _startScreenShare() async {
-    try {
-      final mediaConstraints = <String, dynamic>{
-        'audio': false,
-        'video': {
-          'mandatory': {
-            'minWidth': '720',
-            'minHeight': '1280',
-            'minFrameRate': '30',
-          },
-          'facingMode': 'user',
-          'optional': [],
+        debug {
+            signingConfig signingConfigs.debug
         }
-      };
-
-      MediaStream stream = await navigator.mediaDevices.getDisplayMedia(mediaConstraints);
-      _screenStream = stream;
-      _localRenderer.srcObject = stream;
-
-      setState(() {
-        _isSharing = true;
-      });
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Screen capture error: \$e')));
     }
-  }
-
-  void _stopScreenShare() {
-    _screenStream?.getTracks().forEach((track) => track.stop());
-    _screenStream = null;
-    setState(() {
-      _isSharing = false;
-    });
-  }
-
-  @override
-  void dispose() {
-    _stopScreenShare();
-    _localRenderer.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('बच्चे का फोन - स्क्रीन शेयर')),
-      body: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          children: [
-            Card(
-              color: const Color(0xFF1E293B),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Column(
-                  children: [
-                    const Text('पेयरिंग कोड (Pairing Code):', style: TextStyle(color: Colors.grey)),
-                    const SizedBox(height: 6),
-                    Text(
-                      _roomCode,
-                      style: const TextStyle(fontSize: 36, fontWeight: FontWeight.bold, letterSpacing: 4, color: Colors.cyanAccent),
-                    ),
-                    const SizedBox(height: 10),
-                    const Text('माता-पिता के फोन में यह कोड डालकर लाइव स्क्रीन देखें।', textAlign: TextAlign.center),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 20),
-            Expanded(
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.black,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.white24),
-                ),
-                child: _isSharing
-                    ? RTCVideoView(_localRenderer)
-                    : const Center(
-                        child: Text('स्क्रीन शेयरिंग अभी बंद है\\nStart Screen Share बटन दबाएं', textAlign: TextAlign.center),
-                      ),
-              ),
-            ),
-            const SizedBox(height: 20),
-            ElevatedButton.icon(
-              icon: Icon(_isSharing ? Icons.stop : Icons.play_arrow),
-              label: Text(_isSharing ? 'स्क्रीन शेयरिंग बंद करें' : 'पूरे मोबाइल की स्क्रीन शेयर शुरू करें'),
-              style: ElevatedButton.styleFrom(
-                minimumSize: const Size.fromHeight(54),
-                backgroundColor: _isSharing ? Colors.redAccent : Colors.green,
-                foregroundColor: Colors.white,
-              ),
-              onPressed: _isSharing ? _stopScreenShare : _startScreenShare,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }
 
-class ParentLiveMonitor extends StatefulWidget {
-  const ParentLiveMonitor({super.key});
-
-  @override
-  State<ParentLiveMonitor> createState() => _ParentLiveMonitorState();
+flutter {
+    source '../..'
 }
-
-class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
-  final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
-  final TextEditingController _codeController = TextEditingController(text: 'KID-8429');
-  bool _isConnected = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _remoteRenderer.initialize();
-  }
-
-  void _connectToChild() {
-    setState(() {
-      _isConnected = true;
-    });
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('बच्चे की लाइव स्क्रीन से जुड़ गए!')));
-  }
-
-  @override
-  void dispose() {
-    _remoteRenderer.dispose();
-    _codeController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('माता-पिता का लाइव मॉनिटर')),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _codeController,
-                    decoration: const InputDecoration(
-                      labelText: 'बच्चे का 6-अंकीय कोड',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                ElevatedButton(
-                  onPressed: _connectToChild,
-                  child: const Text('कनेक्ट करें'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Expanded(
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.black,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.white24),
-                ),
-                child: _isConnected
-                    ? RTCVideoView(_remoteRenderer)
-                    : const Center(
-                        child: Text('बच्चे के फोन से सिग्नल की प्रतीक्षा...', textAlign: TextAlign.center),
-                      ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-`;
-
-  const pubspecYaml = `name: kidguard_live
-description: "Child Live Screen Monitor Flutter Mobile Application"
-publish_to: 'none'
-version: 1.0.0+1
-
-environment:
-  sdk: '>=3.0.0 <4.0.0'
-
-dependencies:
-  flutter:
-    sdk: flutter
-  flutter_webrtc: ^0.10.4
-  flutter_foreground_task: ^6.1.1
-  permission_handler: ^11.3.0
-  qr_flutter: ^4.1.0
-  mobile_scanner: ^5.1.1
-  cupertino_icons: ^1.0.6
-
-dev_dependencies:
-  flutter_test:
-    sdk: flutter
-  flutter_lints: ^3.0.0
-
-flutter:
-  uses-material-design: true
 `;
 
   return (
@@ -522,47 +232,45 @@ flutter:
       {/* Overview Banner */}
       <div className="bg-slate-900/80 border border-slate-800 backdrop-blur-md rounded-3xl p-6 shadow-2xl mb-6">
         <div className="flex items-start gap-4">
-          <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-cyan-600 to-blue-600 border border-cyan-500/30 flex items-center justify-center text-white shrink-0 shadow-lg shadow-cyan-600/20">
-            <GitBranch className="w-6 h-6" />
+          <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-emerald-600 via-teal-600 to-cyan-500 border border-emerald-500/30 flex items-center justify-center text-white shrink-0 shadow-lg shadow-emerald-600/20">
+            <CheckCircle2 className="w-6 h-6" />
           </div>
           <div>
             <div className="flex items-center gap-2">
               <h2 className="text-xl font-bold text-white tracking-tight">
-                {lang === 'hi' ? 'GitHub Actions से Signed APK और AAB बनाना' : 'Automated Signed APK & AAB with GitHub Actions'}
+                {lang === 'hi' ? 'स्टेप 2 और 3 हमने आपके लिए पूरा कर दिया!' : 'Step 2 & 3 Done For You!'}
               </h2>
               <span className="px-2 py-0.5 text-[10px] font-bold rounded-md bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                CI/CD Ready
+                100% Configured
               </span>
             </div>
             <p className="text-xs text-slate-300 mt-2 leading-relaxed">
               {lang === 'hi'
-                ? 'GitHub Actions के जरिए आप बिना अपने कंप्यूटर पर भारी Android Studio चलाए, क्लाउड पर ऑटोमैटिक हस्ताक्षरित (Signed) APK (फोन में इंस्टॉल करने के लिए) और AAB (Play Store पर डालने के लिए) फाइल तैयार कर सकते हैं।'
-                : 'Build production-ready, cryptographically signed APK and AAB bundles directly on GitHub cloud runners without needing local Android SDK installations.'}
+                ? 'आपको अपने कंप्यूटर पर keytool कमांड चलाने की कोई ज़रूरत नहीं है। हमने आपके लिए 10,000 दिनों की मान्यता वाला असली RSA 2048 Keystore जनरेट कर दिया है और android/app/build.gradle व android/key.properties फाइल्स भी सीधे प्रोजेक्ट में बना दी हैं!'
+                : 'No need to run keytool or configure Gradle manually. We generated a valid 10,000-day RSA 2048 Keystore and created android/app/build.gradle & key.properties in your project.'}
             </p>
           </div>
         </div>
 
-        {/* Highlight Stats */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-5">
-          <div className="p-3 bg-slate-950/70 border border-slate-800 rounded-xl flex items-center gap-2.5">
-            <Package className="w-5 h-5 text-blue-400 shrink-0" />
+        {/* Status Pills */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-5">
+          <div className="p-3 bg-emerald-950/40 border border-emerald-500/30 rounded-2xl flex items-center gap-3">
+            <div className="p-2 bg-emerald-500/20 rounded-xl text-emerald-400">
+              <Check className="w-4 h-4 font-bold" />
+            </div>
             <div>
-              <p className="text-xs font-bold text-white">Signed APK</p>
-              <p className="text-[10px] text-slate-400">Direct mobile install</p>
+              <p className="text-xs font-bold text-white">स्टेप 2: Gradle & Properties</p>
+              <p className="text-[11px] text-emerald-300">android/app/build.gradle तैयार है</p>
             </div>
           </div>
-          <div className="p-3 bg-slate-950/70 border border-slate-800 rounded-xl flex items-center gap-2.5">
-            <Cpu className="w-5 h-5 text-cyan-400 shrink-0" />
-            <div>
-              <p className="text-xs font-bold text-white">Signed AAB</p>
-              <p className="text-[10px] text-slate-400">Google Play Store upload</p>
+
+          <div className="p-3 bg-emerald-950/40 border border-emerald-500/30 rounded-2xl flex items-center gap-3">
+            <div className="p-2 bg-emerald-500/20 rounded-xl text-emerald-400">
+              <Check className="w-4 h-4 font-bold" />
             </div>
-          </div>
-          <div className="p-3 bg-slate-950/70 border border-slate-800 rounded-xl flex items-center gap-2.5">
-            <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0" />
             <div>
-              <p className="text-xs font-bold text-white">Safe & Secure</p>
-              <p className="text-[10px] text-slate-400">Keystore in GitHub Secrets</p>
+              <p className="text-xs font-bold text-white">स्टेप 3: Keystore & Secrets</p>
+              <p className="text-[11px] text-emerald-300">4 सीक्रेट्स जनरेट होकर नीचे उपलब्ध हैं</p>
             </div>
           </div>
         </div>
@@ -570,6 +278,18 @@ flutter:
 
       {/* Tabs */}
       <div className="flex items-center gap-2 mb-4 overflow-x-auto pb-1">
+        <button
+          onClick={() => setActiveTab('secrets_done')}
+          className={`flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap ${
+            activeTab === 'secrets_done'
+              ? 'bg-emerald-600 text-white shadow-md'
+              : 'bg-slate-800 text-slate-400 hover:text-white'
+          }`}
+        >
+          <KeyRound className="w-3.5 h-3.5" />
+          <span>{lang === 'hi' ? '1. तैयार 4 Secrets (1-Click Copy)' : '1. Pre-Generated Secrets'}</span>
+        </button>
+
         <button
           onClick={() => setActiveTab('github_action')}
           className={`flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap ${
@@ -579,19 +299,7 @@ flutter:
           }`}
         >
           <GitBranch className="w-3.5 h-3.5" />
-          <span>.github/workflows/build-android.yml</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('keystore')}
-          className={`flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap ${
-            activeTab === 'keystore'
-              ? 'bg-blue-600 text-white shadow-md'
-              : 'bg-slate-800 text-slate-400 hover:text-white'
-          }`}
-        >
-          <KeyRound className="w-3.5 h-3.5" />
-          <span>{lang === 'hi' ? 'Keystore व Secrets गाइड' : 'Keystore & Secrets'}</span>
+          <span>2. .github/workflows/build-android.yml</span>
         </button>
 
         <button
@@ -603,32 +311,85 @@ flutter:
           }`}
         >
           <Layers className="w-3.5 h-3.5" />
-          <span>build.gradle व key.properties</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('main')}
-          className={`flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap ${
-            activeTab === 'main'
-              ? 'bg-blue-600 text-white shadow-md'
-              : 'bg-slate-800 text-slate-400 hover:text-white'
-          }`}
-        >
-          <FileCode className="w-3.5 h-3.5" />
-          <span>lib/main.dart</span>
+          <span>3. android/app/build.gradle</span>
         </button>
       </div>
 
-      {/* Tab 1: GitHub Actions YAML */}
+      {/* Tab 1: Pre-Generated Secrets */}
+      {activeTab === 'secrets_done' && (
+        <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-6 shadow-2xl space-y-5">
+          <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+            <div>
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <Lock className="w-5 h-5 text-emerald-400" />
+                <span>{lang === 'hi' ? 'GitHub में डालने के लिए तैयार 4 Secrets:' : 'Ready-to-Use 4 GitHub Secrets:'}</span>
+              </h3>
+              <p className="text-xs text-slate-400 mt-0.5">
+                {lang === 'hi'
+                  ? 'अपनी GitHub Repo > Settings > Secrets and variables > Actions > New repository secret में इन 4 को पेस्ट करें:'
+                  : 'Add these 4 secrets in your GitHub Repo > Settings > Secrets and variables > Actions:'}
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-3.5">
+            {secretsList.map((sec, idx) => (
+              <div
+                key={sec.name}
+                className="p-4 bg-slate-950 border border-slate-800 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:border-slate-700 transition"
+              >
+                <div className="space-y-1 overflow-hidden">
+                  <div className="flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-slate-800 text-slate-300 flex items-center justify-center text-[10px] font-bold">
+                      {idx + 1}
+                    </span>
+                    <span className="font-mono text-cyan-400 font-bold text-sm tracking-wide">
+                      {sec.name}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400">{sec.desc}</p>
+                  <p className="text-[11px] font-mono text-slate-500 truncate max-w-md bg-slate-900/80 px-2 py-1 rounded-md">
+                    {sec.preview}
+                  </p>
+                </div>
+
+                <button
+                  onClick={() => copyToClipboard(sec.value, sec.name)}
+                  className="flex items-center justify-center gap-1.5 px-4 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-xl text-xs font-bold transition shadow-md shadow-emerald-600/20 active:scale-95 shrink-0"
+                >
+                  {copiedFile === sec.name ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                  <span>{copiedFile === sec.name ? t.copied : t.copyCode}</span>
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* 30 Second Action Guide */}
+          <div className="mt-5 p-4 rounded-2xl bg-indigo-950/40 border border-indigo-500/30 flex items-start gap-3">
+            <Sparkles className="w-5 h-5 text-indigo-400 shrink-0 mt-0.5" />
+            <div className="text-xs text-indigo-200">
+              <p className="font-semibold text-white mb-1">
+                {lang === 'hi' ? 'इसके बाद क्या करना है?' : 'What to do next:'}
+              </p>
+              <ol className="list-decimal list-inside space-y-1 text-indigo-200/90">
+                <li>ऊपर दिए गए चारों बटनों से एक-एक करके <strong>Secret Name</strong> और <strong>Value</strong> कॉपी करें।</li>
+                <li>अपने GitHub रिपॉजिटरी में <strong>Settings &gt; Secrets and variables &gt; Actions</strong> में जाकर <strong>New repository secret</strong> पर क्लिक करके सेव कर दें।</li>
+                <li>GitHub के <strong>Actions</strong> टैब में जाएं और <strong>"Build & Sign Android APK and AAB"</strong> को <strong>Run workflow</strong> कर दें।</li>
+                <li>4 मिनट में आपकी Signed APK सीधे डाउनलोड के लिए मिल जाएगी!</li>
+              </ol>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tab 2: Workflow Code */}
       {activeTab === 'github_action' && (
         <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-5 shadow-2xl relative">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-800 mb-4 gap-2">
             <div>
               <span className="text-xs font-mono text-cyan-400 font-bold">.github/workflows/build-android.yml</span>
-              <p className="text-[11px] text-slate-400 mt-0.5">
-                {lang === 'hi'
-                  ? 'यह फाइल अपने GitHub रिपॉजिटरी में .github/workflows/ फोल्डर के अंदर रखें।'
-                  : 'Place this file inside your repository at .github/workflows/build-android.yml'}
+              <p className="text-[11px] text-emerald-400 mt-0.5 font-semibold">
+                ✓ यह फाइल आपके प्रोजेक्ट में पहले से सेव कर दी गई है!
               </p>
             </div>
             <button
@@ -639,159 +400,32 @@ flutter:
               <span>{copiedFile === 'build-android.yml' ? t.copied : t.copyCode}</span>
             </button>
           </div>
-          <pre className="p-4 rounded-2xl bg-slate-950 text-slate-300 font-mono text-xs overflow-x-auto max-h-[520px] leading-relaxed border border-slate-800">
+          <pre className="p-4 rounded-2xl bg-slate-950 text-slate-300 font-mono text-xs overflow-x-auto max-h-[500px] leading-relaxed border border-slate-800">
             {githubActionsYaml}
           </pre>
         </div>
       )}
 
-      {/* Tab 2: Keystore & Secrets Guide */}
-      {activeTab === 'keystore' && (
-        <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-6 shadow-2xl space-y-6">
-          <h3 className="text-base font-bold text-white flex items-center gap-2">
-            <KeyRound className="w-5 h-5 text-amber-400" />
-            <span>{lang === 'hi' ? 'Keystore जनरेट करने और GitHub Secrets में डालने का तरीका:' : 'How to Generate Keystore & Configure GitHub Secrets:'}</span>
-          </h3>
-
-          <div className="space-y-4">
-            {/* Step 1 */}
-            <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800">
-              <div className="flex items-center gap-2 text-amber-400 font-bold text-sm mb-1">
-                <span className="w-6 h-6 rounded-full bg-amber-500/20 flex items-center justify-center text-xs">1</span>
-                <span>{lang === 'hi' ? 'स्टेप 1: अपने कंप्यूटर के टर्मिनल में Keystore बनाएं' : 'Step 1: Generate Release Keystore file'}</span>
-              </div>
-              <p className="text-xs text-slate-400 mb-2">
-                {lang === 'hi' ? 'अपने कंप्यूटर पर टर्मिनल/CMD खोलें और यह कमांड चलाएं (पासवर्ड याद रखें):' : 'Run this command in terminal to create the keystore:'}
-              </p>
-              <div className="bg-slate-900 p-3 rounded-xl font-mono text-xs text-emerald-400 flex items-center justify-between">
-                <code>keytool -genkey -v -keystore upload-keystore.jks -storetype JKS -keyalg RSA -keysize 2048 -validity 10000 -alias upload</code>
-                <button
-                  onClick={() => copyToClipboard('keytool -genkey -v -keystore upload-keystore.jks -storetype JKS -keyalg RSA -keysize 2048 -validity 10000 -alias upload', 'cmd_keytool')}
-                  className="text-slate-400 hover:text-white"
-                >
-                  {copiedFile === 'cmd_keytool' ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-                </button>
-              </div>
-            </div>
-
-            {/* Step 2 */}
-            <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800">
-              <div className="flex items-center gap-2 text-cyan-400 font-bold text-sm mb-1">
-                <span className="w-6 h-6 rounded-full bg-cyan-600/20 flex items-center justify-center text-xs">2</span>
-                <span>{lang === 'hi' ? 'स्टेप 2: Keystore को Base64 में बदलें' : 'Step 2: Convert Keystore to Base64'}</span>
-              </div>
-              <p className="text-xs text-slate-400 mb-2">
-                {lang === 'hi' ? 'GitHub Secrets में फाइल अपलोड नहीं होती, इसलिए इसे टेक्स्ट स्ट्रिंग में बदलना होता है:' : 'Convert file to base64 string to paste into GitHub Secrets:'}
-              </p>
-              <div className="space-y-2">
-                <div className="bg-slate-900 p-3 rounded-xl font-mono text-xs text-slate-300">
-                  <span className="text-slate-500 font-sans block mb-1">Windows (PowerShell):</span>
-                  <code>[Convert]::ToBase64String([IO.File]::ReadAllBytes("upload-keystore.jks")) | Set-Clipboard</code>
-                </div>
-                <div className="bg-slate-900 p-3 rounded-xl font-mono text-xs text-slate-300">
-                  <span className="text-slate-500 font-sans block mb-1">Mac / Linux:</span>
-                  <code>base64 -w 0 upload-keystore.jks</code>
-                </div>
-              </div>
-            </div>
-
-            {/* Step 3 */}
-            <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800">
-              <div className="flex items-center gap-2 text-indigo-400 font-bold text-sm mb-1">
-                <span className="w-6 h-6 rounded-full bg-indigo-600/20 flex items-center justify-center text-xs">3</span>
-                <span>{lang === 'hi' ? 'स्टेप 3: GitHub रिपॉजिटरी में 4 Secrets जोड़ें' : 'Step 3: Add 4 Repository Secrets in GitHub'}</span>
-              </div>
-              <p className="text-xs text-slate-300 mb-3">
-                GitHub Repo &gt; <strong>Settings</strong> &gt; <strong>Secrets and variables</strong> &gt; <strong>Actions</strong> &gt; <strong>New repository secret</strong> पर जाएं:
-              </p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
-                <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
-                  <span className="font-mono text-cyan-400 font-bold block">KEYSTORE_BASE64</span>
-                  <span className="text-slate-400 text-[11px]">स्टेप 2 से कॉपी की गई पूरी लंबी Base64 टेक्स्ट स्ट्रिंग</span>
-                </div>
-                <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
-                  <span className="font-mono text-cyan-400 font-bold block">KEYSTORE_PASSWORD</span>
-                  <span className="text-slate-400 text-[11px]">Keystore बनाते समय डाला गया स्टोर पासवर्ड</span>
-                </div>
-                <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
-                  <span className="font-mono text-cyan-400 font-bold block">KEY_ALIAS</span>
-                  <span className="text-slate-400 text-[11px]">Alias का नाम (उदा: <code>upload</code>)</span>
-                </div>
-                <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
-                  <span className="font-mono text-cyan-400 font-bold block">KEY_PASSWORD</span>
-                  <span className="text-slate-400 text-[11px]">Key का पासवर्ड</span>
-                </div>
-              </div>
-            </div>
-
-            {/* Step 4 */}
-            <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800">
-              <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm mb-1">
-                <span className="w-6 h-6 rounded-full bg-emerald-600/20 flex items-center justify-center text-xs">4</span>
-                <span>{lang === 'hi' ? 'स्टेप 4: बिल्ड चालू करें और APK डाउनलोड करें' : 'Step 4: Trigger Build & Download'}</span>
-              </div>
-              <p className="text-xs text-slate-300 leading-relaxed">
-                {lang === 'hi'
-                  ? 'GitHub पर "Actions" टैब में जाएं, "Build & Sign Android APK and AAB" वर्कफ़्लो चुनें और "Run workflow" बटन दबाएं। लगभग 3-4 मिनट में बिल्ड पूरा होते ही नीचे "Artifacts" में KidGuard-Signed-APK और KidGuard-Signed-AAB डाउनलोड के लिए तैयार मिलेंगे!'
-                  : 'Go to GitHub Actions tab, select "Build & Sign Android APK and AAB", and click "Run workflow". Within 3-4 minutes, your signed APK and AAB will be ready in Artifacts.'}
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Tab 3: Gradle & key.properties */}
+      {/* Tab 3: Gradle Code */}
       {activeTab === 'gradle' && (
-        <div className="space-y-6">
-          <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-5 shadow-2xl relative">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
-              <span className="text-xs font-mono text-cyan-400 font-bold">android/app/build.gradle</span>
-              <button
-                onClick={() => copyToClipboard(buildGradleCode, 'build.gradle')}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold transition shadow-sm active:scale-95"
-              >
-                {copiedFile === 'build.gradle' ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-                <span>{copiedFile === 'build.gradle' ? t.copied : t.copyCode}</span>
-              </button>
-            </div>
-            <pre className="p-4 rounded-2xl bg-slate-950 text-slate-300 font-mono text-xs overflow-x-auto max-h-[380px] leading-relaxed border border-slate-800">
-              {buildGradleCode}
-            </pre>
-          </div>
-
-          <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-5 shadow-2xl relative">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
-              <span className="text-xs font-mono text-cyan-400 font-bold">.gitignore (सुरक्षा के लिए बहुत जरूरी!)</span>
-              <button
-                onClick={() => copyToClipboard(gitignoreSnippet, '.gitignore')}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold transition shadow-sm active:scale-95"
-              >
-                {copiedFile === '.gitignore' ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-                <span>{copiedFile === '.gitignore' ? t.copied : t.copyCode}</span>
-              </button>
-            </div>
-            <pre className="p-4 rounded-2xl bg-slate-950 text-slate-300 font-mono text-xs overflow-x-auto leading-relaxed border border-slate-800">
-              {gitignoreSnippet}
-            </pre>
-          </div>
-        </div>
-      )}
-
-      {/* Tab 4: lib/main.dart */}
-      {activeTab === 'main' && (
         <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-5 shadow-2xl relative">
-          <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
-            <span className="text-xs font-mono text-slate-300">lib/main.dart</span>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-800 mb-4 gap-2">
+            <div>
+              <span className="text-xs font-mono text-cyan-400 font-bold">android/app/build.gradle</span>
+              <p className="text-[11px] text-emerald-400 mt-0.5 font-semibold">
+                ✓ यह फाइल भी आपके प्रोजेक्ट में android/app/build.gradle में सेव कर दी गई है!
+              </p>
+            </div>
             <button
-              onClick={() => copyToClipboard(flutterMainDart, 'main.dart')}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold transition shadow-sm active:scale-95"
+              onClick={() => copyToClipboard(buildGradleCode, 'build.gradle')}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold transition shadow-sm active:scale-95 shrink-0"
             >
-              {copiedFile === 'main.dart' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-              <span>{copiedFile === 'main.dart' ? t.copied : t.copyCode}</span>
+              {copiedFile === 'build.gradle' ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+              <span>{copiedFile === 'build.gradle' ? t.copied : t.copyCode}</span>
             </button>
           </div>
           <pre className="p-4 rounded-2xl bg-slate-950 text-slate-300 font-mono text-xs overflow-x-auto max-h-[500px] leading-relaxed border border-slate-800">
-            {flutterMainDart}
+            {buildGradleCode}
           </pre>
         </div>
       )}
