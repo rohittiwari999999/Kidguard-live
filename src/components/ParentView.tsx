@@ -19,9 +19,11 @@ import {
   AlertCircle, 
   CheckCircle, 
   Sparkles,
-  Smartphone
+  Smartphone,
+  QrCode
 } from 'lucide-react';
 import { PeerManager } from '../services/peerManager';
+import { QRScannerModal } from './QRScannerModal';
 import { sounds } from '../utils/sound';
 import { translations } from '../utils/i18n';
 import { Language, CapturedSnapshot, ActivityEvent } from '../types';
@@ -44,11 +46,12 @@ export const ParentView: React.FC<ParentViewProps> = ({
   const [inputCode, setInputCode] = useState(defaultRoomCode || 'KID-8429');
   const [connectedRoom, setConnectedRoom] = useState<string | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'connecting' | 'connected' | 'disconnected'>('idle');
+  const [showQRScanner, setShowQRScanner] = useState(false);
 
   // Video and Stream refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [hasStream, setHasStream] = useState(false);
-  const [isAudioMuted, setIsAudioMuted] = useState(false);
+  const [isAudioMuted, setIsAudioMuted] = useState(true); // Must be true by default for mobile browser autoplay
   const [zoomLevel, setZoomLevel] = useState<1 | 1.5 | 2>(1);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const videoContainerRef = useRef<HTMLDivElement | null>(null);
@@ -100,10 +103,28 @@ export const ParentView: React.FC<ParentViewProps> = ({
   useEffect(() => {
     if (activeLocalStream && videoRef.current) {
       videoRef.current.srcObject = activeLocalStream;
+      videoRef.current.muted = true;
+      videoRef.current.play().catch(() => {});
       setHasStream(true);
       setConnectionStatus('connected');
     }
   }, [activeLocalStream]);
+
+  // Periodic request while waiting for stream
+  useEffect(() => {
+    let timer: any;
+    if (connectionStatus === 'connecting' && !hasStream && connectedRoom) {
+      // Ping child every 2 seconds to request live stream
+      timer = setInterval(() => {
+        peerManager.sendMessage({
+          type: 'REQUEST_STREAM',
+          payload: { roomCode: connectedRoom },
+          timestamp: Date.now(),
+        });
+      }, 2000);
+    }
+    return () => clearInterval(timer);
+  }, [connectionStatus, hasStream, connectedRoom, peerManager]);
 
   // Handle joining room
   const handleConnect = (codeToJoin?: string) => {
@@ -114,6 +135,8 @@ export const ParentView: React.FC<ParentViewProps> = ({
     if (activeLocalStream) {
       if (videoRef.current) {
         videoRef.current.srcObject = activeLocalStream;
+        videoRef.current.muted = true;
+        videoRef.current.play().catch(() => {});
       }
       setHasStream(true);
       setConnectionStatus('connected');
@@ -130,6 +153,12 @@ export const ParentView: React.FC<ParentViewProps> = ({
       () => {
         // Parent Peer is open and waiting for child to stream
         setConnectionStatus('connecting');
+        // Immediately notify child that parent has connected!
+        peerManager.sendMessage({
+          type: 'REQUEST_STREAM',
+          payload: { parentId: parentPeerId, roomCode: code },
+          timestamp: Date.now(),
+        });
       },
       () => {
         setConnectionStatus('disconnected');
@@ -137,8 +166,13 @@ export const ParentView: React.FC<ParentViewProps> = ({
     );
 
     peerManager.onStream((remoteStream) => {
+      console.log('Received remote stream in parent!');
       if (videoRef.current) {
         videoRef.current.srcObject = remoteStream;
+        videoRef.current.muted = true; // Essential for autoplay on mobile!
+        videoRef.current.play().catch((err) => {
+          console.warn('Video play prevented, will play on user tap:', err);
+        });
       }
       setHasStream(true);
       setConnectionStatus('connected');
@@ -313,18 +347,29 @@ export const ParentView: React.FC<ParentViewProps> = ({
             </div>
           </div>
 
-          {/* Quick Connect Form */}
-          <div className="flex items-center gap-2">
+          {/* Quick Connect Form with QR Scan */}
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setShowQRScanner(true)}
+              className="px-3.5 py-2.5 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white rounded-xl text-xs font-bold transition shadow-md shadow-cyan-600/20 active:scale-95 flex items-center gap-1.5"
+              title={lang === 'hi' ? 'कैमरे से QR कोड स्कैन करें' : 'Scan QR code with camera'}
+            >
+              <QrCode className="w-4 h-4" />
+              <span>{lang === 'hi' ? 'QR स्कैन करें' : 'Scan QR'}</span>
+            </button>
+
+            <span className="text-xs text-slate-500 font-semibold">{lang === 'hi' ? 'या' : 'or'}</span>
+
             <input
               type="text"
               value={inputCode}
               onChange={(e) => setInputCode(e.target.value.toUpperCase())}
               placeholder="KID-1234"
-              className="px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl font-mono text-sm tracking-wider uppercase text-white focus:outline-hidden focus:border-indigo-500 w-32 text-center"
+              className="px-3 py-2.5 bg-slate-950 border border-slate-700 rounded-xl font-mono text-sm tracking-wider uppercase text-white focus:outline-hidden focus:border-indigo-500 w-28 text-center"
             />
             <button
               onClick={() => handleConnect()}
-              className="px-4 py-2.5 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-500 hover:to-blue-500 text-white rounded-xl text-xs font-bold transition shadow-md shadow-indigo-600/20 active:scale-95 flex items-center gap-1.5"
+              className="px-4 py-2.5 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white rounded-xl text-xs font-bold transition shadow-md shadow-indigo-600/20 active:scale-95 flex items-center gap-1.5"
             >
               <Wifi className="w-3.5 h-3.5" />
               <span>{t.joinStream}</span>
@@ -344,6 +389,10 @@ export const ParentView: React.FC<ParentViewProps> = ({
               autoPlay
               playsInline
               muted={isAudioMuted}
+              onLoadedMetadata={(e) => {
+                const vid = e.target as HTMLVideoElement;
+                vid.play().catch(() => {});
+              }}
               className={`w-full h-full object-contain transition-transform duration-300 ${
                 zoomLevel === 1.5 ? 'scale-150' : zoomLevel === 2 ? 'scale-200' : 'scale-100'
               }`}
@@ -641,6 +690,17 @@ export const ParentView: React.FC<ParentViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* QR Scanner Modal for Camera scanning */}
+      <QRScannerModal
+        isOpen={showQRScanner}
+        onClose={() => setShowQRScanner(false)}
+        onScanSuccess={(code) => {
+          setInputCode(code);
+          handleConnect(code);
+        }}
+        lang={lang}
+      />
     </div>
   );
 };

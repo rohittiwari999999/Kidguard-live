@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Smartphone, Eye, Sparkles, ArrowRight, ShieldCheck, CheckCircle } from 'lucide-react';
+import { Smartphone, Eye, Sparkles, ArrowRight, ShieldCheck, CheckCircle, QrCode } from 'lucide-react';
 import { SimulatedChildScreen } from './SimulatedChildScreen';
+import { QRCodeDisplay } from './QRCodeDisplay';
 import { ParentView } from './ParentView';
 import { PeerManager } from '../services/peerManager';
 import { Language } from '../types';
@@ -74,6 +75,17 @@ export const SplitDemoView: React.FC<SplitDemoViewProps> = ({
             onAppChange={(app) => setActiveApp(app)}
             isStreaming={true}
           />
+
+          {/* Quick QR Card to connect real second phone */}
+          <div className="mt-4 pt-4 border-t border-slate-800">
+            <QRCodeDisplay
+              value={typeof window !== 'undefined' ? `${window.location.origin}${window.location.pathname}?role=parent&room=${roomCode}` : `KIDGUARD:${roomCode}`}
+              roomCode={roomCode}
+              size={130}
+              label={lang === 'hi' ? 'असली फोन से QR स्कैन करके देखें' : 'Scan with Real Phone to Watch'}
+              sublabel={lang === 'hi' ? 'अपने दूसरे मोबाइल का कैमरा सामने लाएं और लाइव स्क्रीन देखें' : 'Scan with your second mobile to watch this demo live'}
+            />
+          </div>
         </div>
 
         {/* Center Arrow Indicator (Desktop only) */}

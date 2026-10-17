@@ -1,7 +1,7 @@
 import { Peer, MediaConnection, DataConnection } from 'peerjs';
 
 export interface PeerMessage {
-  type: 'ALERT' | 'PING' | 'ACK' | 'APP_CHANGE' | 'HEARTBEAT';
+  type: 'ALERT' | 'PING' | 'ACK' | 'APP_CHANGE' | 'HEARTBEAT' | 'REQUEST_STREAM' | 'PARENT_JOINED';
   payload: any;
   timestamp: number;
 }
@@ -17,17 +17,31 @@ export class PeerManager {
   private myId: string = '';
 
   constructor() {
-    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-      try {
-        this.broadcastChannel = new BroadcastChannel('kidguard_sync_channel');
-        this.broadcastChannel.onmessage = (event) => {
-          if (event.data && this.onMessageCallback) {
-            this.onMessageCallback(event.data);
-          }
-        };
-      } catch {
-        // Fallback
+    if (typeof window !== 'undefined') {
+      if ('BroadcastChannel' in window) {
+        try {
+          this.broadcastChannel = new BroadcastChannel('kidguard_sync_channel');
+          this.broadcastChannel.onmessage = (event) => {
+            if (event.data && this.onMessageCallback) {
+              this.onMessageCallback(event.data);
+            }
+          };
+        } catch {
+          // Fallback
+        }
       }
+
+      // Also listen to storage events for cross-tab multi-window sync
+      window.addEventListener('storage', (e) => {
+        if (e.key === 'kidguard_last_msg' && e.newValue) {
+          try {
+            const parsed = JSON.parse(e.newValue);
+            this.onMessageCallback?.(parsed);
+          } catch {
+            // ignore
+          }
+        }
+      });
     }
   }
 

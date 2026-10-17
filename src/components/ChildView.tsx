@@ -18,6 +18,7 @@ import {
   CheckCircle2
 } from 'lucide-react';
 import { SimulatedChildScreen } from './SimulatedChildScreen';
+import { QRCodeDisplay } from './QRCodeDisplay';
 import { PeerManager } from '../services/peerManager';
 import { sounds } from '../utils/sound';
 import { translations } from '../utils/i18n';
@@ -41,7 +42,7 @@ export const ChildView: React.FC<ChildViewProps> = ({
   const t = translations[lang];
 
   const [streamSource, setStreamSource] = useState<'simulation' | 'real_screen' | 'camera'>('simulation');
-  const [isStreaming, setIsStreaming] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(true);
   const [copied, setCopied] = useState(false);
   const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string>('');
   const [showQrModal, setShowQrModal] = useState(false);
@@ -76,6 +77,12 @@ export const ChildView: React.FC<ChildViewProps> = ({
       .catch((err) => console.error('QR code generation error:', err));
   }, [roomCode]);
 
+  const broadcastStreamToParent = (stream: MediaStream) => {
+    const parentPeerId = `kg-${roomCode}-parent`;
+    peerManager.callWithStream(parentPeerId, stream);
+    onStreamActive(true, stream);
+  };
+
   // PeerJS setup as Child
   useEffect(() => {
     const childPeerId = `kg-${roomCode}-child`;
@@ -83,13 +90,17 @@ export const ChildView: React.FC<ChildViewProps> = ({
       childPeerId,
       (id) => {
         console.log('Child Peer ready:', id);
+        // If we already have an active stream, send it
+        if (activeStreamRef.current) {
+          broadcastStreamToParent(activeStreamRef.current);
+        }
       },
       (err) => {
         console.warn('Child Peer error:', err);
       }
     );
 
-    // Listen to messages from Parent (like Buzzer / Alert)
+    // Listen to messages from Parent (like Buzzer / Alert or stream request)
     peerManager.onMessage((msg) => {
       if (msg.type === 'ALERT') {
         const alertData: BuzzerAlert = {
@@ -100,6 +111,12 @@ export const ChildView: React.FC<ChildViewProps> = ({
         };
         setActiveAlert(alertData);
         sounds.playBuzzer();
+      } else if (msg.type === 'REQUEST_STREAM' || msg.type === 'PARENT_JOINED') {
+        console.log('Parent requested stream, sending immediately!');
+        if (activeStreamRef.current) {
+          setIsStreaming(true);
+          broadcastStreamToParent(activeStreamRef.current);
+        }
       }
     });
 
@@ -110,21 +127,15 @@ export const ChildView: React.FC<ChildViewProps> = ({
 
   // Handle stream from simulation
   const handleSimulationStream = (stream: MediaStream) => {
-    if (streamSource === 'simulation') {
-      activeStreamRef.current = stream;
-      if (videoPreviewRef.current) {
-        videoPreviewRef.current.srcObject = stream;
-      }
-      if (isStreaming) {
-        broadcastStreamToParent(stream);
-      }
+    activeStreamRef.current = stream;
+    if (videoPreviewRef.current) {
+      videoPreviewRef.current.srcObject = stream;
+      videoPreviewRef.current.muted = true;
+      videoPreviewRef.current.play().catch(() => {});
     }
-  };
-
-  const broadcastStreamToParent = (stream: MediaStream) => {
-    const parentPeerId = `kg-${roomCode}-parent`;
-    peerManager.callWithStream(parentPeerId, stream);
-    onStreamActive(true, stream);
+    if (streamSource === 'simulation') {
+      broadcastStreamToParent(stream);
+    }
   };
 
   // Start Real Screen Capture
@@ -311,14 +322,14 @@ export const ChildView: React.FC<ChildViewProps> = ({
           </button>
         </div>
 
-        {/* Pairing Code & QR Box */}
-        <div className="my-6 p-4 sm:p-5 rounded-2xl bg-gradient-to-br from-slate-950 to-slate-900 border border-slate-800 flex flex-col md:flex-row items-center justify-between gap-5">
-          <div className="space-y-1.5 text-center md:text-left">
-            <span className="text-xs font-medium text-slate-400">
+        {/* Pairing Code & Direct QR Box */}
+        <div className="my-6 p-5 rounded-2xl bg-gradient-to-br from-slate-950 to-slate-900 border border-slate-800 flex flex-col md:flex-row items-center justify-between gap-6 shadow-xl">
+          <div className="space-y-3 text-center md:text-left flex-1">
+            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
               {t.roomCodeLabel}
             </span>
             <div className="flex items-center justify-center md:justify-start gap-3">
-              <span className="text-3xl sm:text-4xl font-extrabold tracking-widest font-mono text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-indigo-300 to-sky-300">
+              <span className="text-3xl sm:text-4xl font-extrabold tracking-widest font-mono text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-indigo-300 to-cyan-300">
                 {roomCode}
               </span>
               <button
@@ -336,24 +347,23 @@ export const ChildView: React.FC<ChildViewProps> = ({
                 <RefreshCw className="w-4 h-4" />
               </button>
             </div>
-            <p className="text-[11px] text-slate-400 max-w-sm">
+            <p className="text-xs text-slate-300 max-w-sm leading-relaxed">
               {lang === 'hi'
-                ? 'यह 6-अंकीय कोड माता-पिता के फोन पर दर्ज करें या दाएँ वाला QR कोड सीधे स्कैन करें।'
-                : 'Enter this 6-digit code on parent device or scan the QR code to connect instantly.'}
+                ? '📱 माता-पिता के फोन से यह सामने दिख रहा QR कोड स्कैन करें या 6-अंकीय कोड दर्ज करें।'
+                : '📱 Scan this QR code with parent device camera or enter the 6-digit code to watch live.'}
             </p>
           </div>
 
-          {/* QR Code thumbnail */}
-          {qrCodeDataUrl && (
-            <div className="flex flex-col items-center gap-1.5 p-2 bg-white rounded-xl shadow-lg cursor-pointer hover:scale-105 transition"
-                 onClick={() => setShowQrModal(true)}>
-              <img src={qrCodeDataUrl} alt="Pairing QR Code" className="w-24 h-24 object-contain" />
-              <span className="text-[10px] text-slate-700 font-bold flex items-center gap-1">
-                <QrIcon className="w-3 h-3 text-blue-600" />
-                {lang === 'hi' ? 'बड़ा QR कोड देखें' : 'Enlarge QR'}
-              </span>
-            </div>
-          )}
+          {/* Prominent Directly Visible QR Code */}
+          <div className="shrink-0">
+            <QRCodeDisplay
+              value={typeof window !== 'undefined' ? `${window.location.origin}${window.location.pathname}?role=parent&room=${roomCode}` : `KIDGUARD:${roomCode}`}
+              roomCode={roomCode}
+              size={150}
+              label={lang === 'hi' ? 'माता-पिता के फोन से स्कैन करें' : 'Scan with Parent Device'}
+              sublabel={lang === 'hi' ? 'कैमरा इसके सामने लाएं' : 'Point camera directly here'}
+            />
+          </div>
         </div>
 
         {/* Source Mode Selector */}
