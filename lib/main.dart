@@ -4,6 +4,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'dart:async';
 
 void main() {
@@ -114,6 +115,20 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
 
   Future<void> _startScreenShare() async {
     try {
+      // 1. Explicitly request Android permissions for Camera & Microphone
+      final permStatuses = await [
+        Permission.camera,
+        Permission.microphone,
+      ].request();
+
+      if (permStatuses[Permission.camera]?.isDenied ?? false) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('कैमरा और माइक अनुमति आवश्यक है (Permissions Required)')),
+          );
+        }
+      }
+
       final mediaConstraints = <String, dynamic>{
         'audio': false,
         'video': {
@@ -130,7 +145,6 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       // Native Android Screen Capture via MediaProjection
       MediaStream stream = await navigator.mediaDevices.getDisplayMedia(mediaConstraints);
       _screenStream = stream;
-      _localRenderer.srcObject = stream;
 
       setState(() {
         _isSharing = true;

@@ -16,7 +16,13 @@ import {
   RefreshCw,
   Eye,
   CheckCircle2,
-  Sparkles
+  Sparkles,
+  Camera,
+  Mic,
+  MicOff,
+  Monitor,
+  AlertCircle,
+  KeyRound
 } from 'lucide-react';
 import { SimulatedChildScreen } from './SimulatedChildScreen';
 import { QRCodeDisplay } from './QRCodeDisplay';
@@ -44,14 +50,20 @@ export const ChildView: React.FC<ChildViewProps> = ({
 }) => {
   const t = translations[lang];
 
-  const [streamSource, setStreamSource] = useState<'simulation' | 'real_screen' | 'camera'>('simulation');
-  const [isStreaming, setIsStreaming] = useState(true);
+  const [streamSource, setStreamSource] = useState<'simulation' | 'real_screen' | 'camera'>('real_screen');
+  const [isStreaming, setIsStreaming] = useState(false);
   const [streamInterrupted, setStreamInterrupted] = useState(false);
   const [bannerError, setBannerError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string>('');
   const [showQrModal, setShowQrModal] = useState(false);
   const [broadcastSeconds, setBroadcastSeconds] = useState(0);
+
+  // Permission states for Camera, Microphone, and Screen Sharing
+  const [cameraPerm, setCameraPerm] = useState<'prompt' | 'granted' | 'denied'>('prompt');
+  const [micPerm, setMicPerm] = useState<'prompt' | 'granted' | 'denied'>('prompt');
+  const [screenPerm, setScreenPerm] = useState<'prompt' | 'granted' | 'denied'>('prompt');
+  const [isRequestingPerms, setIsRequestingPerms] = useState(false);
 
   // Live timer for real screen broadcasting
   useEffect(() => {
@@ -101,6 +113,95 @@ export const ChildView: React.FC<ChildViewProps> = ({
       .then((url) => setQrCodeDataUrl(url))
       .catch((err) => console.error('QR code generation error:', err));
   }, [roomCode]);
+
+  // Check initial permissions state on mount
+  useEffect(() => {
+    if (typeof navigator !== 'undefined' && navigator.permissions?.query) {
+      try {
+        navigator.permissions.query({ name: 'camera' as any }).then((res) => {
+          setCameraPerm(res.state as any);
+          res.onchange = () => setCameraPerm(res.state as any);
+        }).catch(() => {});
+
+        navigator.permissions.query({ name: 'microphone' as any }).then((res) => {
+          setMicPerm(res.state as any);
+          res.onchange = () => setMicPerm(res.state as any);
+        }).catch(() => {});
+      } catch {}
+    }
+  }, []);
+
+  // Explicitly prompt user for Camera Permission
+  const requestCameraPermission = async () => {
+    try {
+      setBannerError(null);
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+      setCameraPerm('granted');
+      sounds.playChime();
+      activeStreamRef.current = stream;
+      if (videoPreviewRef.current) {
+        videoPreviewRef.current.srcObject = stream;
+        videoPreviewRef.current.muted = true;
+        videoPreviewRef.current.play().catch(() => {});
+      }
+      setStreamSource('camera');
+      setIsStreaming(true);
+      setStreamInterrupted(false);
+      broadcastStreamToParent(stream);
+      return true;
+    } catch (err: any) {
+      console.warn('Camera request error:', err);
+      setCameraPerm('denied');
+      setBannerError(
+        lang === 'hi'
+          ? 'कैमरा अनुमति अस्वीकार कर दी गई। कृपया ब्राउज़र पॉपअप में "Allow" चुनें।'
+          : 'Camera permission denied. Please click "Allow" on the browser prompt.'
+      );
+      return false;
+    }
+  };
+
+  // Explicitly prompt user for Microphone Permission
+  const requestMicPermission = async () => {
+    try {
+      setBannerError(null);
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      setMicPerm('granted');
+      sounds.playChime();
+      stream.getTracks().forEach((t) => t.stop());
+      return true;
+    } catch (err: any) {
+      console.warn('Mic request error:', err);
+      setMicPerm('denied');
+      setBannerError(
+        lang === 'hi'
+          ? 'माइक्रोफोन अनुमति अस्वीकार कर दी गई। कृपया पॉपअप में "Allow" चुनें।'
+          : 'Microphone permission denied. Please select "Allow".'
+      );
+      return false;
+    }
+  };
+
+  // 1-Click Request All Permissions
+  const requestAllPermissions = async () => {
+    setIsRequestingPerms(true);
+    setBannerError(null);
+    try {
+      // 1. First prompt Camera & Microphone
+      try {
+        const av = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        setCameraPerm('granted');
+        setMicPerm('granted');
+        av.getTracks().forEach((t) => t.stop());
+      } catch (e1) {
+        console.warn('Camera/Mic permission prompt error:', e1);
+      }
+      // 2. Then prompt Screen Share
+      await startRealScreenCapture();
+    } finally {
+      setIsRequestingPerms(false);
+    }
+  };
 
   const broadcastStreamToParent = (stream: MediaStream) => {
     const parentPeerId = `kg-${roomCode}-parent`;
@@ -452,6 +553,119 @@ export const ChildView: React.FC<ChildViewProps> = ({
             {isLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
             <span>{isLocked ? t.lockActive : t.lockWithPin}</span>
           </button>
+        </div>
+
+        {/* Device Permissions Status & Activation Card */}
+        <div className="my-5 p-4 rounded-2xl bg-gradient-to-r from-indigo-950/60 to-slate-900 border border-indigo-500/30 shadow-lg">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3 pb-3 border-b border-indigo-500/20">
+            <div className="flex items-center gap-2">
+              <div className="p-1.5 bg-indigo-500/20 text-indigo-400 rounded-lg">
+                <KeyRound className="w-4 h-4" />
+              </div>
+              <div>
+                <h4 className="text-xs font-bold text-white uppercase tracking-wider">
+                  {lang === 'hi' ? 'फोन की आवश्यक अनुमतियां (Device Permissions)' : 'Required Device Permissions'}
+                </h4>
+                <p className="text-[11px] text-slate-400">
+                  {lang === 'hi'
+                    ? 'लाइव स्क्रीन, कैमरा और माइक चालू करने के लिए फोन से अनुमति मांगें:'
+                    : 'Permissions required to watch child screen, camera, and hear audio:'}
+                </p>
+              </div>
+            </div>
+
+            <button
+              onClick={requestAllPermissions}
+              disabled={isRequestingPerms}
+              className="px-3.5 py-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition shadow-md flex items-center justify-center gap-1.5 active:scale-95 cursor-pointer shrink-0"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              <span>{lang === 'hi' ? 'सभी अनुमतियां चालू करें (Allow All)' : 'Grant All Permissions'}</span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            {/* Screen Share Perm */}
+            <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Monitor className="w-4 h-4 text-indigo-400 shrink-0" />
+                <div className="truncate">
+                  <p className="text-xs font-semibold text-white truncate">
+                    {lang === 'hi' ? 'स्क्रीन शेयर' : 'Screen Share'}
+                  </p>
+                  <p className="text-[10px] text-slate-400">
+                    {screenPerm === 'granted'
+                      ? (lang === 'hi' ? '✅ अनुमति मिली' : '✅ Allowed')
+                      : (lang === 'hi' ? 'अनुमति नहीं है' : 'Not Allowed')}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={startRealScreenCapture}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer shrink-0 ${
+                  screenPerm === 'granted'
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow'
+                }`}
+              >
+                {screenPerm === 'granted' ? (lang === 'hi' ? 'सक्रिय' : 'Active') : (lang === 'hi' ? 'अनुमति दें' : 'Allow')}
+              </button>
+            </div>
+
+            {/* Camera Perm */}
+            <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Camera className="w-4 h-4 text-cyan-400 shrink-0" />
+                <div className="truncate">
+                  <p className="text-xs font-semibold text-white truncate">
+                    {lang === 'hi' ? 'कैमरा' : 'Camera'}
+                  </p>
+                  <p className="text-[10px] text-slate-400">
+                    {cameraPerm === 'granted'
+                      ? (lang === 'hi' ? '✅ अनुमति मिली' : '✅ Allowed')
+                      : (lang === 'hi' ? 'अनुमति नहीं है' : 'Not Allowed')}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={requestCameraPermission}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer shrink-0 ${
+                  cameraPerm === 'granted'
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    : 'bg-cyan-600 hover:bg-cyan-500 text-white shadow'
+                }`}
+              >
+                {cameraPerm === 'granted' ? (lang === 'hi' ? 'सक्रिय' : 'Active') : (lang === 'hi' ? 'अनुमति दें' : 'Allow')}
+              </button>
+            </div>
+
+            {/* Microphone Perm */}
+            <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Mic className="w-4 h-4 text-emerald-400 shrink-0" />
+                <div className="truncate">
+                  <p className="text-xs font-semibold text-white truncate">
+                    {lang === 'hi' ? 'माइक्रोफोन' : 'Microphone'}
+                  </p>
+                  <p className="text-[10px] text-slate-400">
+                    {micPerm === 'granted'
+                      ? (lang === 'hi' ? '✅ अनुमति मिली' : '✅ Allowed')
+                      : (lang === 'hi' ? 'अनुमति नहीं है' : 'Not Allowed')}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={requestMicPermission}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer shrink-0 ${
+                  micPerm === 'granted'
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow'
+                }`}
+              >
+                {micPerm === 'granted' ? (lang === 'hi' ? 'सक्रिय' : 'Active') : (lang === 'hi' ? 'अनुमति दें' : 'Allow')}
+              </button>
+            </div>
+          </div>
         </div>
 
         {/* Pairing Code & Direct QR Box */}
