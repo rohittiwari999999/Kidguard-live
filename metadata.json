@@ -1,0 +1,6 @@
+{
+  "name": "KidGuard Live - Bal Screen Monitor",
+  "description": "Simple live screen monitoring tool to watch child's screen activity from parent's mobile in real time, with dual-device pairing, screenshot alerts, and Flutter mobile code.",
+  "requestFramePermissions": ["camera", "microphone", "display-capture"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
