@@ -25,10 +25,10 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
-      - name: 3. Set up Flutter
+      - name: 3. Set up Flutter 3.24.5 (LTS Stable)
         uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          flutter-version: '3.24.5'
           cache: true
 
       - name: 4. Verify Flutter & Android Environment
