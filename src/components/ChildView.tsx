@@ -15,14 +15,15 @@ import {
   QrCode as QrIcon,
   RefreshCw,
   Eye,
-  CheckCircle2
+  CheckCircle2,
+  Sparkles
 } from 'lucide-react';
 import { SimulatedChildScreen } from './SimulatedChildScreen';
 import { QRCodeDisplay } from './QRCodeDisplay';
 import { PeerManager } from '../services/peerManager';
 import { sounds } from '../utils/sound';
 import { translations } from '../utils/i18n';
-import { Language, BuzzerAlert } from '../types';
+import { Language, BuzzerAlert, DeviceRole } from '../types';
 
 interface ChildViewProps {
   lang: Language;
@@ -30,6 +31,7 @@ interface ChildViewProps {
   roomCode: string;
   onRegenerateCode: () => void;
   onStreamActive: (active: boolean, stream: MediaStream | null) => void;
+  onSelectRole?: (role: DeviceRole) => void;
 }
 
 export const ChildView: React.FC<ChildViewProps> = ({
@@ -38,11 +40,14 @@ export const ChildView: React.FC<ChildViewProps> = ({
   roomCode,
   onRegenerateCode,
   onStreamActive,
+  onSelectRole,
 }) => {
   const t = translations[lang];
 
   const [streamSource, setStreamSource] = useState<'simulation' | 'real_screen' | 'camera'>('simulation');
   const [isStreaming, setIsStreaming] = useState(true);
+  const [streamInterrupted, setStreamInterrupted] = useState(false);
+  const [bannerError, setBannerError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string>('');
   const [showQrModal, setShowQrModal] = useState(false);
@@ -125,6 +130,17 @@ export const ChildView: React.FC<ChildViewProps> = ({
     };
   }, [roomCode, peerManager]);
 
+  // Keepalive stream broadcast so parent connects instantly without blank screen
+  useEffect(() => {
+    if (!isStreaming) return;
+    const interval = setInterval(() => {
+      if (activeStreamRef.current && isStreaming) {
+        broadcastStreamToParent(activeStreamRef.current);
+      }
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [isStreaming, roomCode]);
+
   // Handle stream from simulation
   const handleSimulationStream = (stream: MediaStream) => {
     activeStreamRef.current = stream;
@@ -138,68 +154,112 @@ export const ChildView: React.FC<ChildViewProps> = ({
     }
   };
 
-  // Start Real Screen Capture
+  // Start Real Screen Capture (Safe for mobile Android Chrome and Desktop)
   const startRealScreenCapture = async () => {
+    setBannerError(null);
+    setStreamInterrupted(false);
+
     try {
       if (!navigator.mediaDevices?.getDisplayMedia) {
-        alert(
+        setBannerError(
           lang === 'hi'
-            ? 'आपके ब्राउज़र में getDisplayMedia सपोर्ट नहीं है। कृपया सिमुलेशन मोड या कैमरा मोड चुनें।'
+            ? 'आपके ब्राउज़र में getDisplayMedia स्क्रीन शेयरिंग समर्थित नहीं है। कृपया सिमुलेशन मोड या कैमरा मोड चुनें।'
             : 'DisplayMedia screen sharing is not supported in this browser. Please use Simulation or Camera mode.'
         );
         return;
       }
 
-      const screenStream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          displaySurface: 'monitor',
-        },
-        audio: true,
-      });
+      let screenStream: MediaStream | null = null;
+      try {
+        // Safe cross-platform parameters: audio must be false on Android mobile!
+        screenStream = await navigator.mediaDevices.getDisplayMedia({
+          video: {
+            frameRate: { ideal: 15, max: 24 },
+            width: { ideal: 1280, max: 1280 },
+            height: { ideal: 720, max: 720 },
+          } as any,
+          audio: false, // CRITICAL: Setting audio: true crashes Android Chrome media pipe
+        });
+      } catch (err1: any) {
+        console.warn('Advanced displayMedia failed, trying simple fallback:', err1);
+        screenStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: false,
+        });
+      }
+
+      if (!screenStream) {
+        throw new Error('No screen stream returned');
+      }
 
       activeStreamRef.current = screenStream;
       if (videoPreviewRef.current) {
         videoPreviewRef.current.srcObject = screenStream;
+        videoPreviewRef.current.muted = true;
+        videoPreviewRef.current.play().catch(() => {});
       }
 
-      screenStream.getVideoTracks()[0].onended = () => {
-        stopStreaming();
-      };
+      const videoTrack = screenStream.getVideoTracks()[0];
+      if (videoTrack) {
+        videoTrack.onended = () => {
+          console.log('Screen capture track ended or suspended by OS backgrounding');
+          setStreamInterrupted(true);
+          setIsStreaming(false);
+          onStreamActive(false, null);
+        };
+      }
 
       setIsStreaming(true);
+      setStreamInterrupted(false);
       broadcastStreamToParent(screenStream);
       sounds.playChime();
     } catch (err: any) {
       console.warn('Screen share error or user cancelled:', err);
       if (err.name !== 'NotAllowedError') {
-        alert('Screen share permission error: ' + err.message);
+        setBannerError(
+          lang === 'hi'
+            ? `स्क्रीन शेयरिंग शुरू नहीं हो सकी: ${err.message || 'त्रुटि'}। कृपया दोबारा कोशिश करें या सिमुलेशन मोड चुनें।`
+            : `Could not start screen share: ${err.message || 'Error'}. Please try again or use Simulation mode.`
+        );
       }
     }
   };
 
   // Start Camera Feed
   const startCameraCapture = async () => {
+    setBannerError(null);
+    setStreamInterrupted(false);
+
     try {
       const camStream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'user' },
-        audio: true,
+        audio: false,
       });
 
       activeStreamRef.current = camStream;
       if (videoPreviewRef.current) {
         videoPreviewRef.current.srcObject = camStream;
+        videoPreviewRef.current.muted = true;
+        videoPreviewRef.current.play().catch(() => {});
       }
 
       setIsStreaming(true);
+      setStreamInterrupted(false);
       broadcastStreamToParent(camStream);
       sounds.playChime();
     } catch (err: any) {
-      alert('Camera access denied or unavailable: ' + err.message);
+      setBannerError(
+        lang === 'hi'
+          ? `कैमरा चालू नहीं हो सका: ${err.message || 'अनुमति अस्वीकार'}`
+          : `Camera access denied or unavailable: ${err.message}`
+      );
     }
   };
 
   // Start Sharing
   const handleStartShare = () => {
+    setBannerError(null);
+    setStreamInterrupted(false);
     if (streamSource === 'real_screen') {
       startRealScreenCapture();
     } else if (streamSource === 'camera') {
@@ -253,6 +313,60 @@ export const ChildView: React.FC<ChildViewProps> = ({
 
   return (
     <div className="max-w-2xl mx-auto px-4 py-6">
+      {/* Interrupted stream alert (e.g. app switch in mobile Android) */}
+      {streamInterrupted && (
+        <div className="mb-6 p-4 rounded-2xl bg-amber-500/15 border-2 border-amber-500/40 text-amber-200 shadow-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="p-2 bg-amber-500 text-slate-950 rounded-xl shrink-0 mt-0.5">
+              <AlertTriangle className="w-5 h-5" />
+            </div>
+            <div>
+              <h4 className="text-sm font-bold text-white">
+                {lang === 'hi' ? 'स्क्रीन शेयरिंग रुक गई (या दूसरा ऐप खुला)' : 'Screen sharing paused (App switched)'}
+              </h4>
+              <p className="text-xs text-amber-200/90 mt-1 max-w-md leading-relaxed">
+                {lang === 'hi'
+                  ? 'Android फोन में जब आप कोई दूसरा ऐप खोलते हैं, तो मोबाइल Chrome बैकग्राउंड में स्क्रीन शेयरिंग रोक देता है। दोबारा शुरू करने के लिए यहाँ दबाएं।'
+                  : 'On Android mobile, opening another app pauses the browser screen stream. Tap below to resume.'}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 w-full sm:w-auto">
+            <button
+              onClick={handleStartShare}
+              className="flex-1 sm:flex-initial px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl transition flex items-center justify-center gap-1.5 shadow-md active:scale-95"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>{lang === 'hi' ? 'दोबारा शुरू करें' : 'Resume Sharing'}</span>
+            </button>
+            {onSelectRole && (
+              <button
+                onClick={() => onSelectRole('flutter-guide')}
+                className="flex-1 sm:flex-initial px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-xl transition border border-slate-700"
+              >
+                {lang === 'hi' ? 'Flutter APK देखें' : 'View Flutter APK'}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Inline Error Banner */}
+      {bannerError && (
+        <div className="mb-6 p-4 rounded-2xl bg-rose-500/15 border border-rose-500/40 text-rose-200 shadow-lg flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0" />
+            <p className="text-xs font-medium text-rose-200">{bannerError}</p>
+          </div>
+          <button
+            onClick={() => setBannerError(null)}
+            className="px-2.5 py-1 bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 text-xs rounded-lg transition"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Alert Banner if Parent sends message */}
       {activeAlert && (
         <div className="mb-6 p-4 rounded-2xl bg-amber-500/15 border-2 border-amber-500/40 text-amber-200 animate-bounce shadow-xl flex items-start justify-between gap-3">
@@ -432,6 +546,51 @@ export const ChildView: React.FC<ChildViewProps> = ({
               </div>
             </button>
           </div>
+
+          {/* Android Mobile Guidance Card */}
+          <div className="mt-3.5 p-3.5 bg-blue-950/30 border border-blue-900/40 rounded-2xl text-xs space-y-2">
+            <div className="flex items-center gap-2 text-blue-300 font-semibold">
+              <Sparkles className="w-4 h-4 text-cyan-400 shrink-0" />
+              <span>
+                {lang === 'hi'
+                  ? 'Android फोन पर स्क्रीन शेयर के लिए विशेष जानकारी:'
+                  : 'Important notes for Android screen sharing:'}
+              </span>
+            </div>
+            <ul className="text-slate-300 text-[11px] space-y-1.5 pl-4 list-disc leading-relaxed">
+              <li>
+                <strong>{lang === 'hi' ? 'पूरे फोन की स्क्रीन (Entire Screen):' : 'Entire Screen:'}</strong>{' '}
+                {lang === 'hi'
+                  ? 'अब मोबाइल के अनुकूल सेटिंग्स के साथ क्रैश नहीं होगा। Android का "Start recording/casting" प्रॉम्प्ट आने पर "Start now" दबाएं।'
+                  : 'Optimized for mobile browsers without crashing. Tap "Start now" on Android system prompt.'}
+              </li>
+              <li>
+                <strong>{lang === 'hi' ? 'सिंगल ऐप (Single App):' : 'Single App:'}</strong>{' '}
+                {lang === 'hi'
+                  ? 'जब आप कोई ऐप चुनते हैं, तो Android OS खुद उस ऐप को खोल देता है।'
+                  : 'Android brings the selected app to foreground automatically.'}
+              </li>
+              <li>
+                <strong>{lang === 'hi' ? '24x7 बैकग्राउंड मॉनिटरिंग:' : '24/7 Background Monitoring:'}</strong>{' '}
+                {lang === 'hi'
+                  ? 'वेब ब्राउज़र दूसरा ऐप खुलने पर बैकग्राउंड में स्क्रीन रोक देता है। यदि आप चाहते हैं कि बच्चा कोई भी गेम या यूट्यूब चलाए और स्क्रीन कभी न रुके, तो'
+                  : 'Mobile browsers pause when child switches to other apps. For uninterrupted background screen mirroring,'}{' '}
+                {onSelectRole ? (
+                  <button
+                    onClick={() => onSelectRole('flutter-guide')}
+                    className="text-cyan-400 font-bold underline hover:text-cyan-300 inline cursor-pointer"
+                  >
+                    {lang === 'hi' ? 'Flutter Android APK का इस्तेमाल करें' : 'use Flutter Android APK'}
+                  </button>
+                ) : (
+                  <span className="text-cyan-400 font-bold">
+                    {lang === 'hi' ? 'Flutter Android APK का इस्तेमाल करें' : 'use Flutter Android APK'}
+                  </span>
+                )}
+                ।
+              </li>
+            </ul>
+          </div>
         </div>
 
         {/* Live Stream View or Interactive Simulation */}
@@ -453,16 +612,43 @@ export const ChildView: React.FC<ChildViewProps> = ({
                 className="w-full h-full object-contain"
               />
               {!isStreaming && (
-                <div className="absolute inset-0 bg-slate-950/80 flex flex-col items-center justify-center text-center p-4">
-                  <Cast className="w-10 h-10 text-slate-500 mb-2" />
-                  <p className="text-sm font-medium text-slate-300">
-                    {lang === 'hi' ? 'कैमरा या स्क्रीन अभी शुरू नहीं हुई है' : 'Stream is not currently started'}
-                  </p>
-                  <p className="text-xs text-slate-500 mt-1 max-w-xs">
-                    {lang === 'hi'
-                      ? 'नीचे दिए गए नीले बटन "स्क्रीन शेयरिंग शुरू करें" पर क्लिक करें।'
-                      : 'Click the button below to grant permission and start streaming.'}
-                  </p>
+                <div className="absolute inset-0 bg-slate-950/85 backdrop-blur-xs flex flex-col items-center justify-center text-center p-4">
+                  {streamInterrupted ? (
+                    <>
+                      <div className="p-3 bg-amber-500/20 text-amber-400 rounded-2xl mb-2 border border-amber-500/30">
+                        <AlertTriangle className="w-8 h-8" />
+                      </div>
+                      <p className="text-sm font-bold text-white">
+                        {lang === 'hi'
+                          ? 'स्क्रीन शेयरिंग रुक गई (या ऐप स्विच हुआ)'
+                          : 'Screen stream paused (App switched)'}
+                      </p>
+                      <p className="text-xs text-slate-300 mt-1 max-w-xs leading-relaxed">
+                        {lang === 'hi'
+                          ? 'Android फोन में ब्राउज़र बैकग्राउंड में जाते ही स्क्रीन पॉज हो जाती है।'
+                          : 'Browser paused the stream because another app was opened.'}
+                      </p>
+                      <button
+                        onClick={handleStartShare}
+                        className="mt-3 px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl transition flex items-center gap-1.5 shadow-lg active:scale-95"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>{lang === 'hi' ? 'दोबारा स्क्रीन शेयर शुरू करें' : 'Resume Screen Share'}</span>
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <Cast className="w-10 h-10 text-slate-500 mb-2" />
+                      <p className="text-sm font-medium text-slate-300">
+                        {lang === 'hi' ? 'कैमरा या स्क्रीन अभी शुरू नहीं हुई है' : 'Stream is not currently started'}
+                      </p>
+                      <p className="text-xs text-slate-500 mt-1 max-w-xs">
+                        {lang === 'hi'
+                          ? 'नीचे दिए गए नीले बटन "स्क्रीन शेयरिंग शुरू करें" पर क्लिक करें।'
+                          : 'Click the button below to grant permission and start streaming.'}
+                      </p>
+                    </>
+                  )}
                 </div>
               )}
             </div>

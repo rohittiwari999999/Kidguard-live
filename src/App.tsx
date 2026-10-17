@@ -10,33 +10,61 @@ import { translations } from './utils/i18n';
 import { ShieldCheck, Heart, Sparkles, Smartphone, Tv } from 'lucide-react';
 
 export default function App() {
-  const [lang, setLang] = useState<Language>('hi');
-  const [currentRole, setCurrentRole] = useState<DeviceRole>('split-demo');
-  const [roomCode, setRoomCode] = useState<string>('KID-8429');
+  const [lang, setLang] = useState<Language>(() => {
+    try {
+      return (localStorage.getItem('kidguard_lang') as Language) || 'hi';
+    } catch {
+      return 'hi';
+    }
+  });
+
+  const [currentRole, setCurrentRole] = useState<DeviceRole>(() => {
+    try {
+      const urlRole = new URLSearchParams(window.location.search).get('role') as DeviceRole;
+      if (urlRole && ['parent', 'child', 'split-demo', 'flutter-guide'].includes(urlRole)) {
+        return urlRole;
+      }
+      const saved = localStorage.getItem('kidguard_active_role') as DeviceRole;
+      if (saved && ['parent', 'child', 'split-demo', 'flutter-guide'].includes(saved)) {
+        return saved;
+      }
+    } catch {
+      // ignore
+    }
+    return 'child'; // Default to child on first launch
+  });
+
+  const [roomCode, setRoomCode] = useState<string>(() => {
+    try {
+      const urlRoom = new URLSearchParams(window.location.search).get('room');
+      if (urlRoom) return urlRoom;
+      const saved = localStorage.getItem('kidguard_room_code');
+      if (saved) return saved;
+    } catch {
+      // ignore
+    }
+    return 'KID-8429';
+  });
+
   const [isStreamActive, setIsStreamActive] = useState<boolean>(false);
   const [activeStream, setActiveStream] = useState<MediaStream | null>(null);
 
   // Singleton instance of PeerManager
   const peerManager = useMemo(() => new PeerManager(), []);
 
-  // Parse URL params for QR code scan auto-connect
+  // Sync state to localStorage and URL so tab reloading/app switching never loses the screen!
   useEffect(() => {
     try {
-      const urlParams = new URLSearchParams(window.location.search);
-      const roleParam = urlParams.get('role') as DeviceRole | null;
-      const roomParam = urlParams.get('room');
+      localStorage.setItem('kidguard_active_role', currentRole);
+      localStorage.setItem('kidguard_room_code', roomCode);
+      localStorage.setItem('kidguard_lang', lang);
 
-      if (roomParam) {
-        setRoomCode(roomParam);
-      }
-
-      if (roleParam && ['parent', 'child', 'split-demo', 'flutter-guide'].includes(roleParam)) {
-        setCurrentRole(roleParam);
-      }
+      const newUrl = `${window.location.pathname}?role=${currentRole}&room=${roomCode}`;
+      window.history.replaceState(null, '', newUrl);
     } catch {
       // ignore
     }
-  }, []);
+  }, [currentRole, roomCode, lang]);
 
   const generateNewRoomCode = () => {
     const num = Math.floor(1000 + Math.random() * 9000);
@@ -73,6 +101,7 @@ export default function App() {
             roomCode={roomCode}
             onRegenerateCode={generateNewRoomCode}
             onStreamActive={handleStreamActiveChange}
+            onSelectRole={setCurrentRole}
           />
         )}
 

@@ -113,28 +113,33 @@ export class PeerManager {
 
   // Child calls Parent with screen stream
   callWithStream(targetPeerId: string, stream: MediaStream) {
-    if (!this.peer) return;
+    if (!this.peer || this.peer.destroyed) return;
 
-    this.onConnectionStatusCallback?.('connecting');
-    const call = this.peer.call(targetPeerId, stream);
-    this.currentCall = call;
+    try {
+      this.onConnectionStatusCallback?.('connecting');
+      const call = this.peer.call(targetPeerId, stream);
+      if (!call) return;
+      this.currentCall = call;
 
-    call.on('stream', (remoteStream) => {
-      this.onConnectionStatusCallback?.('connected');
-      this.onStreamCallback?.(remoteStream);
-    });
+      call.on('stream', (remoteStream) => {
+        this.onConnectionStatusCallback?.('connected');
+        this.onStreamCallback?.(remoteStream);
+      });
 
-    call.on('close', () => {
-      this.onConnectionStatusCallback?.('disconnected');
-    });
+      call.on('close', () => {
+        this.onConnectionStatusCallback?.('disconnected');
+      });
 
-    call.on('error', (err) => {
-      console.warn('Call error:', err);
-      this.onConnectionStatusCallback?.('disconnected');
-    });
+      call.on('error', () => {
+        // Safe offline handler
+        this.onConnectionStatusCallback?.('disconnected');
+      });
 
-    // Also connect data channel
-    this.connectData(targetPeerId);
+      // Also connect data channel
+      this.connectData(targetPeerId);
+    } catch (err) {
+      console.warn('callWithStream non-fatal error:', err);
+    }
   }
 
   connectData(targetPeerId: string) {
