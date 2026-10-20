@@ -144,6 +144,7 @@ export default function App() {
               peerManager={peerManager}
               roomCode={roomCode}
               onRegenerateCode={generateNewRoomCode}
+              onUpdateRoomCode={(newCode) => setRoomCode(newCode.trim().toUpperCase())}
               onStreamActive={handleStreamActiveChange}
               onSelectRole={setCurrentRole}
             />

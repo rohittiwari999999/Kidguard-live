@@ -45,9 +45,13 @@ export class PeerManager {
     }
   }
 
+  private onPeerConnectedCallback: ((peerId: string) => void) | null = null;
+
   initPeer(customId: string, onReady?: (id: string) => void, onError?: (err: any) => void) {
     if (this.peer) {
-      this.peer.destroy();
+      try {
+        this.peer.destroy();
+      } catch {}
     }
 
     this.myId = customId;
@@ -76,19 +80,20 @@ export class PeerManager {
         return;
       }
       if (err && err.type === 'unavailable-id') {
-        // ID temporarily active from recent session
+        // ID temporarily active from recent session, fallback cleanly
         return;
       }
       console.warn('Peer error handled:', err?.message || err);
       onError?.(err);
     });
 
-    // Handle incoming data connections
+    // Handle incoming data connections (e.g. Parent connects to Child)
     this.peer.on('connection', (conn) => {
       this.setupDataConnection(conn);
+      this.onPeerConnectedCallback?.(conn.peer);
     });
 
-    // Handle incoming calls (e.g. if parent calls child or child answers)
+    // Handle incoming calls (e.g. Child calls Parent with stream)
     this.peer.on('call', (call) => {
       this.currentCall = call;
       this.onConnectionStatusCallback?.('connecting');
@@ -109,6 +114,10 @@ export class PeerManager {
         this.onConnectionStatusCallback?.('disconnected');
       });
     });
+  }
+
+  onPeerConnected(callback: (peerId: string) => void) {
+    this.onPeerConnectedCallback = callback;
   }
 
   // Child calls Parent with screen stream
@@ -149,30 +158,35 @@ export class PeerManager {
         this.onConnectionStatusCallback?.('disconnected');
       });
 
-      // Connect data channel
+      // Also connect data channel to ensure two-way messaging
       this.connectData(targetPeerId);
     } catch (err) {
       console.warn('callWithStream non-fatal error:', err);
     }
   }
 
-  connectData(targetPeerId: string) {
-    if (!this.peer || this.peer.destroyed) return;
+  connectData(targetPeerId: string, onOpen?: () => void) {
+    if (!this.peer || this.peer.destroyed || !this.peer.open) return;
     try {
+      if (this.dataConn && this.dataConn.open && this.dataConn.peer === targetPeerId) {
+        onOpen?.();
+        return;
+      }
       const conn = this.peer.connect(targetPeerId, { reliable: true });
       conn.on('error', () => {
         // Suppress unhandled peer connection errors when target is offline
       });
-      this.setupDataConnection(conn);
+      this.setupDataConnection(conn, onOpen);
     } catch {
       // ignore
     }
   }
 
-  private setupDataConnection(conn: DataConnection) {
+  private setupDataConnection(conn: DataConnection, onOpen?: () => void) {
     this.dataConn = conn;
     conn.on('open', () => {
       this.onConnectionStatusCallback?.('connected');
+      onOpen?.();
     });
 
     conn.on('data', (data: any) => {

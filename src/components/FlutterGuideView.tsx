@@ -522,6 +522,43 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
     super.dispose();
   }
 
+  void _showEditCodeDialog() {
+    final controller = TextEditingController(text: _roomCode);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E293B),
+        title: const Text('पेयरिंग कोड बदलें (Edit Code)', style: TextStyle(color: Colors.white)),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, letterSpacing: 2, color: Colors.cyanAccent),
+          textAlign: TextAlign.center,
+          textCapitalization: TextCapitalization.characters,
+          decoration: const InputDecoration(border: OutlineInputBorder(), hintText: 'उदा. 123456 या MYCODE'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              final randomNum = 1000 + (DateTime.now().millisecondsSinceEpoch % 9000);
+              setState(() { _roomCode = 'KID-\$randomNum'; });
+              Navigator.pop(ctx);
+            },
+            child: const Text('रैंडम कोड'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final val = controller.text.trim().toUpperCase();
+              if (val.isNotEmpty) setState(() { _roomCode = val; });
+              Navigator.pop(ctx);
+            },
+            child: const Text('सेव करें'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -534,17 +571,45 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
               color: const Color(0xFF1E293B),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
               child: Padding(
-                padding: const EdgeInsets.all(20),
+                padding: const EdgeInsets.all(16),
                 child: Column(
                   children: [
                     const Text('पेयरिंग कोड (Pairing Code):', style: TextStyle(color: Colors.grey)),
-                    const SizedBox(height: 6),
-                    Text(
-                      _roomCode,
-                      style: const TextStyle(fontSize: 36, fontWeight: FontWeight.bold, letterSpacing: 4, color: Colors.cyanAccent),
+                    const SizedBox(height: 8),
+                    InkWell(
+                      onTap: _showEditCodeDialog,
+                      borderRadius: BorderRadius.circular(16),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: Colors.black45,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: Colors.cyanAccent.withOpacity(0.5)),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              _roomCode,
+                              style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold, letterSpacing: 3, color: Colors.cyanAccent),
+                            ),
+                            const SizedBox(width: 8),
+                            const Icon(Icons.edit, color: Colors.cyanAccent, size: 20),
+                          ],
+                        ),
+                      ),
                     ),
-                    const SizedBox(height: 10),
-                    const Text('माता-पिता के फोन में यह कोड डालकर लाइव स्क्रीन देखें।', textAlign: TextAlign.center),
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        TextButton.icon(icon: const Icon(Icons.edit, size: 16), label: const Text('कोड बदलें'), onPressed: _showEditCodeDialog),
+                        TextButton.icon(icon: const Icon(Icons.refresh, size: 16), label: const Text('नया रैंडम'), onPressed: () {
+                          final r = 1000 + (DateTime.now().millisecondsSinceEpoch % 9000);
+                          setState(() { _roomCode = 'KID-\$r'; });
+                        }),
+                      ],
+                    ),
                   ],
                 ),
               ),

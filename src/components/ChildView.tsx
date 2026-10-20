@@ -23,7 +23,8 @@ import {
   Monitor,
   AlertCircle,
   KeyRound,
-  ArrowRight
+  ArrowRight,
+  Edit3
 } from 'lucide-react';
 import { QRCodeDisplay } from './QRCodeDisplay';
 import { PeerManager } from '../services/peerManager';
@@ -36,6 +37,7 @@ interface ChildViewProps {
   peerManager: PeerManager;
   roomCode: string;
   onRegenerateCode: () => void;
+  onUpdateRoomCode?: (code: string) => void;
   onStreamActive: (active: boolean, stream: MediaStream | null) => void;
   onSelectRole?: (role: DeviceRole) => void;
 }
@@ -45,6 +47,7 @@ export const ChildView: React.FC<ChildViewProps> = ({
   peerManager,
   roomCode,
   onRegenerateCode,
+  onUpdateRoomCode,
   onStreamActive,
   onSelectRole,
 }) => {
@@ -59,6 +62,11 @@ export const ChildView: React.FC<ChildViewProps> = ({
   const [showQrModal, setShowQrModal] = useState(false);
   const [showAndroidGuidanceModal, setShowAndroidGuidanceModal] = useState(false);
   const [broadcastSeconds, setBroadcastSeconds] = useState(0);
+
+  // Pairing code editing state (allows child or parent to set custom code or click to edit)
+  const [isEditingCode, setIsEditingCode] = useState(false);
+  const [customCodeInput, setCustomCodeInput] = useState(roomCode);
+  const [editError, setEditError] = useState('');
 
   // Permission states for Camera, Microphone, and Screen Sharing
   const [cameraPerm, setCameraPerm] = useState<'prompt' | 'granted' | 'denied'>('prompt');
@@ -227,6 +235,15 @@ export const ChildView: React.FC<ChildViewProps> = ({
       }
     );
 
+    // When Parent connects to Child, immediately send stream!
+    peerManager.onPeerConnected((parentPeerId) => {
+      console.log('Parent peer connected to child:', parentPeerId);
+      if (activeStreamRef.current) {
+        setIsStreaming(true);
+        peerManager.callWithStream(parentPeerId, activeStreamRef.current);
+      }
+    });
+
     // Listen to messages from Parent (like Buzzer / Alert or stream request)
     peerManager.onMessage((msg) => {
       if (msg.type === 'ALERT') {
@@ -240,9 +257,10 @@ export const ChildView: React.FC<ChildViewProps> = ({
         sounds.playBuzzer();
       } else if (msg.type === 'REQUEST_STREAM' || msg.type === 'PARENT_JOINED') {
         console.log('Parent requested stream, sending immediately!');
+        const targetParent = msg.payload?.parentId || `kg-${roomCode}-parent`;
         if (activeStreamRef.current) {
           setIsStreaming(true);
-          broadcastStreamToParent(activeStreamRef.current);
+          peerManager.callWithStream(targetParent, activeStreamRef.current);
         }
       }
     });
@@ -252,12 +270,22 @@ export const ChildView: React.FC<ChildViewProps> = ({
     };
   }, [roomCode, peerManager]);
 
-  // Only broadcast when stream becomes active or when parent explicitly requests it
+  // Keepalive stream broadcast: If child is streaming and parent joins, automatically stream to parent
   useEffect(() => {
     if (isStreaming && activeStreamRef.current) {
       broadcastStreamToParent(activeStreamRef.current);
     }
-  }, [isStreaming]);
+    let interval: any;
+    if (isStreaming && activeStreamRef.current) {
+      interval = setInterval(() => {
+        if (activeStreamRef.current) {
+          const parentPeerId = `kg-${roomCode}-parent`;
+          peerManager.callWithStream(parentPeerId, activeStreamRef.current);
+        }
+      }, 3000);
+    }
+    return () => clearInterval(interval);
+  }, [isStreaming, roomCode, peerManager]);
 
   // Start Real Screen Capture (Safe for mobile Android Chrome and Desktop)
   const startRealScreenCapture = async () => {
@@ -700,25 +728,98 @@ export const ChildView: React.FC<ChildViewProps> = ({
             <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
               {t.roomCodeLabel}
             </span>
-            <div className="flex items-center justify-center md:justify-start gap-3">
-              <span className="text-3xl sm:text-4xl font-extrabold tracking-widest font-mono text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-indigo-300 to-cyan-300">
-                {roomCode}
-              </span>
-              <button
-                onClick={copyRoomCode}
-                title={t.copyCode}
-                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 transition active:scale-95 border border-slate-700"
-              >
-                {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-              </button>
-              <button
-                onClick={onRegenerateCode}
-                title="Generate new code"
-                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 transition border border-slate-700"
-              >
-                <RefreshCw className="w-4 h-4" />
-              </button>
-            </div>
+            {isEditingCode ? (
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-center md:justify-start gap-2">
+                  <input
+                    type="text"
+                    value={customCodeInput}
+                    onChange={(e) => {
+                      setCustomCodeInput(e.target.value.toUpperCase());
+                      setEditError('');
+                    }}
+                    placeholder="उदा. MYCODE, 123456"
+                    className="px-3 py-2 bg-slate-950 border-2 border-indigo-500 rounded-xl font-mono text-xl tracking-wider uppercase text-white w-44 text-center focus:outline-hidden focus:ring-2 focus:ring-indigo-400"
+                    autoFocus
+                    maxLength={14}
+                  />
+                  <button
+                    onClick={() => {
+                      const clean = customCodeInput.trim().toUpperCase();
+                      if (clean.length < 3) {
+                        setEditError(lang === 'hi' ? 'कम से कम 3 अक्षर होने चाहिए' : 'Min 3 chars required');
+                        return;
+                      }
+                      onUpdateRoomCode?.(clean);
+                      setIsEditingCode(false);
+                      sounds.playChime();
+                    }}
+                    className="px-3.5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition flex items-center gap-1 shadow-md cursor-pointer active:scale-95"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>{lang === 'hi' ? 'सेव करें' : 'Save'}</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      onRegenerateCode();
+                      setIsEditingCode(false);
+                    }}
+                    title={lang === 'hi' ? 'रैंडम कोड बनाएं' : 'Generate Random Code'}
+                    className="px-3 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition flex items-center gap-1 shadow-md cursor-pointer active:scale-95"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>{lang === 'hi' ? 'रैंडम' : 'Random'}</span>
+                  </button>
+                  <button
+                    onClick={() => setIsEditingCode(false)}
+                    className="px-3 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-semibold cursor-pointer"
+                  >
+                    ✕
+                  </button>
+                </div>
+                {editError && (
+                  <p className="text-xs text-rose-400 font-medium">{editError}</p>
+                )}
+                <p className="text-[11px] text-slate-400">
+                  {lang === 'hi' ? 'अपनी पसंद का कोई भी आसान कोड या नंबर दर्ज करें।' : 'Enter any custom code or number you prefer.'}
+                </p>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center justify-center md:justify-start gap-2.5">
+                <button
+                  onClick={() => {
+                    setCustomCodeInput(roomCode);
+                    setIsEditingCode(true);
+                  }}
+                  title={lang === 'hi' ? 'अपनी पसंद का कोड बदलने के लिए क्लिक करें' : 'Click to customize pairing code'}
+                  className="group flex items-center gap-2.5 px-3.5 py-1.5 rounded-2xl bg-slate-950/90 hover:bg-slate-800 border-2 border-indigo-500/50 hover:border-indigo-400 transition-all shadow-md cursor-pointer active:scale-95"
+                >
+                  <span className="text-3xl sm:text-4xl font-extrabold tracking-widest font-mono text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-indigo-300 to-cyan-300 group-hover:scale-105 transition-transform">
+                    {roomCode}
+                  </span>
+                  <div className="flex items-center gap-1 px-2 py-0.5 rounded-lg bg-indigo-500/20 text-indigo-300 text-[10px] font-bold uppercase tracking-wider group-hover:bg-indigo-500 group-hover:text-white transition">
+                    <Edit3 className="w-3 h-3" />
+                    <span>{lang === 'hi' ? 'बदलें' : 'Edit'}</span>
+                  </div>
+                </button>
+
+                <button
+                  onClick={copyRoomCode}
+                  title={t.copyCode}
+                  className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 transition active:scale-95 border border-slate-700 cursor-pointer"
+                >
+                  {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                </button>
+
+                <button
+                  onClick={onRegenerateCode}
+                  title={lang === 'hi' ? 'नया रैंडम कोड बनाएं' : 'Generate new random code'}
+                  className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 transition border border-slate-700 cursor-pointer active:rotate-180"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                </button>
+              </div>
+            )}
             <p className="text-xs text-slate-300 max-w-sm leading-relaxed">
               {lang === 'hi'
                 ? '📱 माता-पिता के फोन से यह सामने दिख रहा QR कोड स्कैन करें या 6-अंकीय कोड दर्ज करें।'

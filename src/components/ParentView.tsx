@@ -114,12 +114,16 @@ export const ParentView: React.FC<ParentViewProps> = ({
   useEffect(() => {
     let timer: any;
     if (connectionStatus === 'connecting' && !hasStream && connectedRoom) {
+      const childPeerId = `kg-${connectedRoom}-child`;
+      const parentPeerId = `kg-${connectedRoom}-parent`;
       // Ping child every 2 seconds to request live stream
       timer = setInterval(() => {
-        peerManager.sendMessage({
-          type: 'REQUEST_STREAM',
-          payload: { roomCode: connectedRoom },
-          timestamp: Date.now(),
+        peerManager.connectData(childPeerId, () => {
+          peerManager.sendMessage({
+            type: 'REQUEST_STREAM',
+            payload: { parentId: parentPeerId, roomCode: connectedRoom },
+            timestamp: Date.now(),
+          });
         });
       }, 2000);
     }
@@ -147,17 +151,20 @@ export const ParentView: React.FC<ParentViewProps> = ({
     setConnectedRoom(code);
 
     const parentPeerId = `kg-${code}-parent`;
+    const childPeerId = `kg-${code}-child`;
 
     peerManager.initPeer(
       parentPeerId,
       () => {
         // Parent Peer is open and waiting for child to stream
         setConnectionStatus('connecting');
-        // Immediately notify child that parent has connected!
-        peerManager.sendMessage({
-          type: 'REQUEST_STREAM',
-          payload: { parentId: parentPeerId, roomCode: code },
-          timestamp: Date.now(),
+        // Actively connect data connection to child across different devices!
+        peerManager.connectData(childPeerId, () => {
+          peerManager.sendMessage({
+            type: 'REQUEST_STREAM',
+            payload: { parentId: parentPeerId, roomCode: code },
+            timestamp: Date.now(),
+          });
         });
       },
       () => {
@@ -170,8 +177,9 @@ export const ParentView: React.FC<ParentViewProps> = ({
       if (videoRef.current) {
         videoRef.current.srcObject = remoteStream;
         videoRef.current.muted = true; // Essential for autoplay on mobile!
+        videoRef.current.playsInline = true;
         videoRef.current.play().catch((err) => {
-          console.warn('Video play prevented, will play on user tap:', err);
+          console.warn('Video play prevented by browser policy, will play on user tap:', err);
         });
       }
       setHasStream(true);
