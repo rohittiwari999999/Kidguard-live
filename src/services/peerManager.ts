@@ -115,9 +115,16 @@ export class PeerManager {
   callWithStream(targetPeerId: string, stream: MediaStream) {
     if (!this.peer || this.peer.destroyed || !this.peer.open) return;
 
-    // If call is already active, do not tear it down
-    if (this.currentCall && (this.currentCall as any).open) {
-      return;
+    // Prevent duplicate calls if already connecting or connected
+    if (this.currentCall) {
+      const pc = this.currentCall.peerConnection;
+      if (pc && (pc.connectionState === 'connected' || pc.connectionState === 'connecting' || pc.iceConnectionState === 'connected')) {
+        return; // Connection is already active, don't recreate encoder
+      }
+      try {
+        this.currentCall.close();
+      } catch {}
+      this.currentCall = null;
     }
 
     try {
@@ -136,12 +143,13 @@ export class PeerManager {
         this.onConnectionStatusCallback?.('disconnected');
       });
 
-      call.on('error', () => {
+      call.on('error', (err) => {
+        console.warn('Call error caught safely:', err?.message || err);
         this.currentCall = null;
         this.onConnectionStatusCallback?.('disconnected');
       });
 
-      // Also connect data channel
+      // Connect data channel
       this.connectData(targetPeerId);
     } catch (err) {
       console.warn('callWithStream non-fatal error:', err);

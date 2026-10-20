@@ -39,6 +39,12 @@
             android:foregroundServiceType="mediaProjection"
             android:stopWithTask="true" />
 
+        <!-- Native Android MediaProjection Screen Capture Service -->
+        <service
+            android:name=".ScreenCaptureService"
+            android:foregroundServiceType="mediaProjection"
+            android:exported="false" />
+
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />

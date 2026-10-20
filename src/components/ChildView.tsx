@@ -251,16 +251,12 @@ export const ChildView: React.FC<ChildViewProps> = ({
     };
   }, [roomCode, peerManager]);
 
-  // Keepalive stream broadcast so parent connects instantly without blank screen
+  // Only broadcast when stream becomes active or when parent explicitly requests it
   useEffect(() => {
-    if (!isStreaming) return;
-    const interval = setInterval(() => {
-      if (activeStreamRef.current && isStreaming) {
-        broadcastStreamToParent(activeStreamRef.current);
-      }
-    }, 4000);
-    return () => clearInterval(interval);
-  }, [isStreaming, roomCode]);
+    if (isStreaming && activeStreamRef.current) {
+      broadcastStreamToParent(activeStreamRef.current);
+    }
+  }, [isStreaming]);
 
   // Start Real Screen Capture (Safe for mobile Android Chrome and Desktop)
   const startRealScreenCapture = async () => {
@@ -280,41 +276,35 @@ export const ChildView: React.FC<ChildViewProps> = ({
       const isMobile = typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod|webOS/i.test(navigator.userAgent);
       let screenStream: MediaStream | null = null;
 
-      try {
-        if (isMobile) {
-          // On mobile Android, strictly pass video: true and audio: false.
-          // Sub-constraints crash Chrome on Android!
-          screenStream = await navigator.mediaDevices.getDisplayMedia({
-            video: true,
-            audio: false,
-          });
-        } else {
-          try {
-            screenStream = await navigator.mediaDevices.getDisplayMedia({
-              video: {
-                frameRate: { ideal: 15, max: 24 },
-                width: { ideal: 1280, max: 1280 },
-                height: { ideal: 720, max: 720 },
-              } as any,
-              audio: false,
-            });
-          } catch {
-            screenStream = await navigator.mediaDevices.getDisplayMedia({
-              video: true,
-              audio: false,
-            });
-          }
-        }
-      } catch (err1: any) {
-        console.warn('Advanced displayMedia failed, trying direct fallback:', err1);
+      if (isMobile) {
+        // Mobile Android Chrome: Cleanest single call without constraints
         screenStream = await navigator.mediaDevices.getDisplayMedia({
           video: true,
           audio: false,
         });
+      } else {
+        try {
+          screenStream = await navigator.mediaDevices.getDisplayMedia({
+            video: {
+              frameRate: { ideal: 15, max: 24 },
+              width: { ideal: 1280, max: 1280 },
+              height: { ideal: 720, max: 720 },
+            } as any,
+            audio: false,
+          });
+        } catch (errDesktop: any) {
+          if (errDesktop.name === 'NotAllowedError' || errDesktop.name === 'AbortError') {
+            return; // User cancelled, don't spam prompt
+          }
+          screenStream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: false,
+          });
+        }
       }
 
       if (!screenStream) {
-        throw new Error('No screen stream returned');
+        return;
       }
 
       activeStreamRef.current = screenStream;
