@@ -278,14 +278,126 @@ flutter {
 `;
 
   const mainDartCode = `// lib/main.dart
-// KidGuard Live - Full Native Flutter Android Screen Monitoring
+// KidGuard Live - Full Flutter Mobile Application
+// Real-time Child Screen Monitoring via WebRTC & Foreground Service MediaProjection
+// Android 13/14/15/16 Compatible with complete Signaling, ICE Candidate Queueing,
+// Unified Plan track fallback, and full code editing on Kid & Parent devices.
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:isolate';
+
+const String kDefaultSignalingServer = 'https://ais-dev-6snjgczxe5mnz34fbgzs4p-751137797858.asia-east1.run.app';
+
+class SignalingService {
+  final String baseUrl;
+  final HttpClient _client = HttpClient()
+    ..connectionTimeout = const Duration(seconds: 10)
+    ..badCertificateCallback = ((X509Certificate cert, String host, int port) => true);
+
+  SignalingService({this.baseUrl = kDefaultSignalingServer});
+
+  Future<bool> sendOffer(String roomCode, String sdp, String type) async {
+    try {
+      final uri = Uri.parse('\${baseUrl}/api/signal/room/\${roomCode}/offer');
+      final request = await _client.postUrl(uri);
+      request.headers.contentType = ContentType.json;
+      request.write(jsonEncode({'sdp': sdp, 'type': type}));
+      final response = await request.close();
+      return response.statusCode == 200;
+    } catch (e) {
+      debugPrint('Signaling sendOffer error: \$e');
+      return false;
+    }
+  }
+
+  Future<Map<String, dynamic>?> getOffer(String roomCode) async {
+    try {
+      final uri = Uri.parse('\${baseUrl}/api/signal/room/\${roomCode}/offer');
+      final request = await _client.getUrl(uri);
+      final response = await request.close();
+      if (response.statusCode == 200) {
+        final body = await response.transform(utf8.decoder).join();
+        return jsonDecode(body) as Map<String, dynamic>;
+      }
+    } catch (e) {
+      debugPrint('Signaling getOffer error: \$e');
+    }
+    return null;
+  }
+
+  Future<bool> sendAnswer(String roomCode, String sdp, String type) async {
+    try {
+      final uri = Uri.parse('\${baseUrl}/api/signal/room/\${roomCode}/answer');
+      final request = await _client.postUrl(uri);
+      request.headers.contentType = ContentType.json;
+      request.write(jsonEncode({'sdp': sdp, 'type': type}));
+      final response = await request.close();
+      return response.statusCode == 200;
+    } catch (e) {
+      debugPrint('Signaling sendAnswer error: \$e');
+      return false;
+    }
+  }
+
+  Future<Map<String, dynamic>?> getAnswer(String roomCode) async {
+    try {
+      final uri = Uri.parse('\${baseUrl}/api/signal/room/\${roomCode}/answer');
+      final request = await _client.getUrl(uri);
+      final response = await request.close();
+      if (response.statusCode == 200) {
+        final body = await response.transform(utf8.decoder).join();
+        return jsonDecode(body) as Map<String, dynamic>;
+      }
+    } catch (e) {
+      debugPrint('Signaling getAnswer error: \$e');
+    }
+    return null;
+  }
+
+  Future<bool> sendCandidate(String roomCode, String candidate, String? sdpMid, int? sdpMLineIndex, String sender) async {
+    try {
+      final uri = Uri.parse('\${baseUrl}/api/signal/room/\${roomCode}/candidate');
+      final request = await _client.postUrl(uri);
+      request.headers.contentType = ContentType.json;
+      request.write(jsonEncode({
+        'candidate': candidate,
+        'sdpMid': sdpMid,
+        'sdpMLineIndex': sdpMLineIndex,
+        'sender': sender,
+      }));
+      final response = await request.close();
+      return response.statusCode == 200;
+    } catch (e) {
+      debugPrint('Signaling sendCandidate error: \$e');
+      return false;
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> getCandidates(String roomCode, String forRole, int sinceTimestamp) async {
+    try {
+      final uri = Uri.parse('\${baseUrl}/api/signal/room/\${roomCode}/candidates?for=\${forRole}&since=\${sinceTimestamp}');
+      final request = await _client.getUrl(uri);
+      final response = await request.close();
+      if (response.statusCode == 200) {
+        final body = await response.transform(utf8.decoder).join();
+        final data = jsonDecode(body);
+        if (data is Map && data['candidates'] is List) {
+          return List<Map<String, dynamic>>.from(data['candidates']);
+        }
+      }
+    } catch (e) {
+      debugPrint('Signaling getCandidates error: \$e');
+    }
+    return [];
+  }
+}
 
 // Top-level entry point required by flutter_foreground_task v6.x
 @pragma('vm:entry-point')
@@ -340,7 +452,7 @@ class RoleSelectionScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('KidGuard Live - Bal Monitor'),
+        title: const Text('KidGuard Live - बाल मॉनिटर'),
         centerTitle: true,
         backgroundColor: const Color(0xFF1E293B),
       ),
@@ -394,7 +506,7 @@ class RoleSelectionScreen extends StatelessWidget {
 }
 
 // -------------------------------------------------------------
-// 1. CHILD SCREEN CAPTURE (Uses Android MediaProjection Foreground Service)
+// 1. CHILD SCREEN CAPTURE (Broadcasts Screen to Parent)
 // -------------------------------------------------------------
 class ChildScreenCapture extends StatefulWidget {
   const ChildScreenCapture({super.key});
@@ -404,15 +516,34 @@ class ChildScreenCapture extends StatefulWidget {
 }
 
 class _ChildScreenCaptureState extends State<ChildScreenCapture> {
-  final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
+  static const MethodChannel _platformChannel = MethodChannel('com.example.kidguard_live/screen_capture');
+  final SignalingService _signaling = SignalingService();
+  final TextEditingController _codeController = TextEditingController(text: 'KID-8429');
+
+  RTCPeerConnection? _peerConnection;
   MediaStream? _screenStream;
   bool _isSharing = false;
-  String _roomCode = 'KID-8429';
+  String _statusMessage = 'तैयार है। स्क्रीन शेयर शुरू करें।';
+  bool _isParentConnected = false;
+
+  Timer? _answerPollTimer;
+  Timer? _candidatePollTimer;
+  int _lastCandidateTimestamp = 0;
+  bool _isRemoteDescSet = false;
+  final List<RTCIceCandidate> _queuedCandidates = [];
+
+  final Map<String, dynamic> _iceServers = {
+    'iceServers': [
+      {'urls': 'stun:stun.l.google.com:19302'},
+      {'urls': 'stun:stun1.l.google.com:19302'},
+      {'urls': 'stun:stun2.l.google.com:19302'},
+    ],
+    'sdpSemantics': 'unified-plan',
+  };
 
   @override
   void initState() {
     super.initState();
-    _localRenderer.initialize();
     _initForegroundTask();
   }
 
@@ -425,10 +556,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         channelImportance: NotificationChannelImportance.LOW,
         priority: NotificationPriority.LOW,
       ),
-      iosNotificationOptions: const IOSNotificationOptions(
-        showNotification: false,
-        playSound: false,
-      ),
+      iosNotificationOptions: const IOSNotificationOptions(showNotification: false, playSound: false),
       foregroundTaskOptions: const ForegroundTaskOptions(
         interval: 5000,
         isOnceEvent: false,
@@ -439,44 +567,50 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
     );
   }
 
-  static const MethodChannel _platformChannel = MethodChannel('com.example.kidguard_live/screen_capture');
-
+  // EXACT SEQUENCE FIX:
+  // 1. Pehle createPeerConnection() call karo
+  // 2. Fir getDisplayMedia() se screen stream lo
+  // 3. Fir _peerConnection.addTrack(track, _screenStream!) call karo
+  // 4. Sabse last me createOffer() aur setLocalDescription(offer)
   Future<void> _startScreenShare() async {
-    try {
-      // 1. Android 13/14/15/16 Notification Permission (Mandatory for Foreground Service)
-      await Permission.notification.request();
+    final roomCode = _codeController.text.trim().toUpperCase();
+    if (roomCode.isEmpty) return;
 
-      // 2. Request Camera & Mic
+    try {
+      await Permission.notification.request();
       await [Permission.camera, Permission.microphone].request();
 
-      // 3. Android 14/15/16 Native Screen Capture via MainActivity & ScreenCaptureService
-      try {
-        final bool? nativeSuccess = await _platformChannel.invokeMethod<bool>('startScreenCapture');
-        if (nativeSuccess == true) {
-          if (mounted) {
-            setState(() {
-              _isSharing = true;
-            });
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('✅ Native Android 14/15/16 स्क्रीन शेयरिंग शुरू हो गई!'),
-                backgroundColor: Colors.green,
-              ),
-            );
-          }
-          return;
-        }
-      } on PlatformException catch (pe) {
-        if (pe.code == 'CANCELLED') return;
-      } on MissingPluginException {}
+      if (await FlutterForegroundTask.isRunningService == false) {
+        await FlutterForegroundTask.startService(
+          notificationTitle: 'KidGuard Live Streaming',
+          notificationText: 'स्क्रीन माता-पिता के फोन पर प्रसारित हो रही है',
+          callback: startCallback,
+        );
+      }
 
-      // Fallback WebRTC
-      final mediaConstraints = <String, dynamic>{
-        'audio': false,
-        'video': true,
+      try {
+        await _platformChannel.invokeMethod('startScreenCapture');
+      } catch (_) {}
+
+      // 1. Pehle createPeerConnection() call karo
+      _peerConnection = await createPeerConnection(_iceServers);
+
+      _peerConnection!.onIceConnectionState = (RTCIceConnectionState state) {
+        debugPrint("📡 [Kid] ICE Connection State: \$state");
+        if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
+            state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+          if (mounted) setState(() { _isParentConnected = true; _statusMessage = '✅ माता-पिता का फोन जुड़ गया है!'; });
+        }
       };
 
-      MediaStream stream = await navigator.mediaDevices.getDisplayMedia(mediaConstraints);
+      _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
+        if (candidate.candidate != null) {
+          _signaling.sendCandidate(roomCode, candidate.candidate!, candidate.sdpMid, candidate.sdpMLineIndex, 'kid');
+        }
+      };
+
+      // 2. Fir getDisplayMedia() se screen stream lo
+      MediaStream stream = await navigator.mediaDevices.getDisplayMedia({'audio': false, 'video': true});
       _screenStream = stream;
 
       stream.getVideoTracks().forEach((track) {
@@ -485,85 +619,98 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         };
       });
 
-      if (mounted) {
-        setState(() {
-          _isSharing = true;
-        });
+      // 3. Fir _peerConnection.addTrack(track, _localStream!) call karo
+      for (final track in stream.getTracks()) {
+        await _peerConnection!.addTrack(track, stream);
       }
+
+      // 4. Sabse last me createOffer() aur setLocalDescription(offer)
+      RTCSessionDescription offer = await _peerConnection!.createOffer({'offerToReceiveVideo': 0, 'offerToReceiveAudio': 0});
+      await _peerConnection!.setLocalDescription(offer);
+      await _signaling.sendOffer(roomCode, offer.sdp!, offer.type!);
+
+      setState(() {
+        _isSharing = true;
+        _isRemoteDescSet = false;
+        _queuedCandidates.clear();
+        _statusMessage = '🔴 ब्रॉडकास्ट चालू है! माता-पिता के जुड़ने की प्रतीक्षा...';
+      });
+
+      _startPollingForAnswer(roomCode);
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('सूचना: \$e'), backgroundColor: Colors.redAccent),
-        );
-      }
+      debugPrint('Screen share error: \$e');
+      _stopScreenShare();
     }
   }
 
+  void _startPollingForAnswer(String roomCode) {
+    _answerPollTimer?.cancel();
+    _answerPollTimer = Timer.periodic(const Duration(seconds: 1), (timer) async {
+      if (!_isSharing || _isRemoteDescSet || _peerConnection == null) return;
+      final answerData = await _signaling.getAnswer(roomCode);
+      if (answerData != null && answerData['sdp'] != null && !_isRemoteDescSet) {
+        _isRemoteDescSet = true;
+        timer.cancel();
+        RTCSessionDescription answer = RTCSessionDescription(answerData['sdp'], answerData['type'] ?? 'answer');
+        await _peerConnection!.setRemoteDescription(answer);
+        _drainQueuedCandidates();
+        _startListeningToParentIceCandidates(roomCode);
+        if (mounted) setState(() { _statusMessage = 'माता-पिता जुड़ गए!'; });
+      }
+    });
+  }
+
+  void _startListeningToParentIceCandidates(String roomCode) {
+    _candidatePollTimer?.cancel();
+    _candidatePollTimer = Timer.periodic(const Duration(milliseconds: 1500), (timer) async {
+      if (!_isSharing || _peerConnection == null) { timer.cancel(); return; }
+      final list = await _signaling.getCandidates(roomCode, 'kid', _lastCandidateTimestamp);
+      for (final item in list) {
+        final ts = item['timestamp'] as int? ?? 0;
+        if (ts > _lastCandidateTimestamp) _lastCandidateTimestamp = ts;
+        if (item['candidate'] != null) {
+          final candidate = RTCIceCandidate(item['candidate'], item['sdpMid'], item['sdpMLineIndex']);
+          if (_isRemoteDescSet) {
+            await _peerConnection!.addCandidate(candidate);
+          } else {
+            _queuedCandidates.add(candidate);
+          }
+        }
+      }
+    });
+  }
+
+  void _drainQueuedCandidates() async {
+    for (final c in _queuedCandidates) {
+      try { await _peerConnection?.addCandidate(c); } catch (_) {}
+    }
+    _queuedCandidates.clear();
+  }
+
   void _stopScreenShare() async {
-    try {
-      await _platformChannel.invokeMethod('stopScreenCapture');
-    } catch (_) {}
+    _answerPollTimer?.cancel();
+    _candidatePollTimer?.cancel();
+    try { await _platformChannel.invokeMethod('stopScreenCapture'); } catch (_) {}
     _screenStream?.getTracks().forEach((track) => track.stop());
     _screenStream = null;
-    try {
-      FlutterForegroundTask.stopService();
-    } catch (_) {}
-    if (mounted) {
-      setState(() {
-        _isSharing = false;
-      });
-    }
+    try { await _peerConnection?.close(); } catch (_) {}
+    _peerConnection = null;
+    try { FlutterForegroundTask.stopService(); } catch (_) {}
+    if (mounted) setState(() { _isSharing = false; _isParentConnected = false; _statusMessage = 'स्क्रीन शेयरिंग बंद है।'; });
   }
 
   @override
   void dispose() {
     _stopScreenShare();
-    _localRenderer.dispose();
+    _codeController.dispose();
     super.dispose();
-  }
-
-  void _showEditCodeDialog() {
-    final controller = TextEditingController(text: _roomCode);
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1E293B),
-        title: const Text('पेयरिंग कोड बदलें (Edit Code)', style: TextStyle(color: Colors.white)),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, letterSpacing: 2, color: Colors.cyanAccent),
-          textAlign: TextAlign.center,
-          textCapitalization: TextCapitalization.characters,
-          decoration: const InputDecoration(border: OutlineInputBorder(), hintText: 'उदा. 123456 या MYCODE'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              final randomNum = 1000 + (DateTime.now().millisecondsSinceEpoch % 9000);
-              setState(() { _roomCode = 'KID-\$randomNum'; });
-              Navigator.pop(ctx);
-            },
-            child: const Text('रैंडम कोड'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              final val = controller.text.trim().toUpperCase();
-              if (val.isNotEmpty) setState(() { _roomCode = val; });
-              Navigator.pop(ctx);
-            },
-            child: const Text('सेव करें'),
-          ),
-        ],
-      ),
-    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('बच्चे का फोन - स्क्रीन शेयर')),
-      body: Padding(
+      appBar: AppBar(title: const Text('बच्चे का फोन - स्क्रीन शेयर'), backgroundColor: const Color(0xFF1E293B)),
+      body: SingleChildScrollView(
         padding: const EdgeInsets.all(20),
         child: Column(
           children: [
@@ -571,43 +718,44 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
               color: const Color(0xFF1E293B),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
               child: Padding(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.all(18),
                 child: Column(
                   children: [
-                    const Text('पेयरिंग कोड (Pairing Code):', style: TextStyle(color: Colors.grey)),
-                    const SizedBox(height: 8),
-                    InkWell(
-                      onTap: _showEditCodeDialog,
-                      borderRadius: BorderRadius.circular(16),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                        decoration: BoxDecoration(
-                          color: Colors.black45,
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: Colors.cyanAccent.withOpacity(0.5)),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              _roomCode,
-                              style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold, letterSpacing: 3, color: Colors.cyanAccent),
-                            ),
-                            const SizedBox(width: 8),
-                            const Icon(Icons.edit, color: Colors.cyanAccent, size: 20),
-                          ],
-                        ),
+                    const Text('पेयरिंग कोड (Pairing Code):', style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 10),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.black54,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: Colors.cyanAccent.withOpacity(0.6), width: 2),
+                      ),
+                      child: TextField(
+                        controller: _codeController,
+                        textAlign: TextAlign.center,
+                        textCapitalization: TextCapitalization.characters,
+                        enabled: !_isSharing,
+                        style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, letterSpacing: 3, color: Colors.cyanAccent),
+                        decoration: const InputDecoration(border: InputBorder.none, hintText: 'उदा. KID-8429'),
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 10),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        TextButton.icon(icon: const Icon(Icons.edit, size: 16), label: const Text('कोड बदलें'), onPressed: _showEditCodeDialog),
-                        TextButton.icon(icon: const Icon(Icons.refresh, size: 16), label: const Text('नया रैंडम'), onPressed: () {
-                          final r = 1000 + (DateTime.now().millisecondsSinceEpoch % 9000);
-                          setState(() { _roomCode = 'KID-\$r'; });
-                        }),
+                        TextButton.icon(
+                          icon: const Icon(Icons.refresh, size: 18),
+                          label: const Text('🎲 नया कोड'),
+                          onPressed: _isSharing ? null : () {
+                            final r = 1000 + (DateTime.now().millisecondsSinceEpoch % 9000);
+                            setState(() { _codeController.text = 'KID-\$r'; });
+                          },
+                        ),
+                        TextButton.icon(
+                          icon: const Icon(Icons.copy, size: 18),
+                          label: const Text('कॉपी करें'),
+                          onPressed: () => Clipboard.setData(ClipboardData(text: _codeController.text)),
+                        ),
                       ],
                     ),
                   ],
@@ -615,55 +763,24 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
               ),
             ),
             const SizedBox(height: 20),
-            Expanded(
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.black,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.white24),
-                ),
-                child: _isSharing
-                    ? Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            const Icon(Icons.screen_share, size: 72, color: Colors.greenAccent),
-                            const SizedBox(height: 16),
-                            const Text(
-                              '🔴 स्क्रीन लाइव शेयर हो रही है!\\nScreen is Live Broadcasting',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
-                            ),
-                            const SizedBox(height: 12),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                              decoration: BoxDecoration(
-                                color: Colors.green.withOpacity(0.2),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: Colors.greenAccent),
-                              ),
-                              child: const Text(
-                                'अब आप कोई भी ऐप (YouTube, Game) चलाएं,\\nमाता-पिता के फोन पर लाइव दिखता रहेगा।',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(color: Colors.greenAccent, fontSize: 13),
-                              ),
-                            ),
-                          ],
-                        ),
-                      )
-                    : const Center(
-                        child: Text('स्क्रीन शेयरिंग अभी बंद है\\n"स्क्रीन शेयर शुरू करें" बटन दबाएं', textAlign: TextAlign.center),
-                      ),
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: _isSharing ? Colors.green.withOpacity(0.15) : Colors.black38,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: _isSharing ? Colors.greenAccent : Colors.white24),
               ),
+              child: Text(_statusMessage, textAlign: TextAlign.center, style: TextStyle(color: _isSharing ? Colors.greenAccent : Colors.white70)),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 24),
             ElevatedButton.icon(
-              icon: Icon(_isSharing ? Icons.stop : Icons.play_arrow),
+              icon: Icon(_isSharing ? Icons.stop : Icons.play_arrow, size: 28),
               label: Text(_isSharing ? 'स्क्रीन शेयरिंग बंद करें' : 'पूरे मोबाइल की स्क्रीन शेयर शुरू करें'),
               style: ElevatedButton.styleFrom(
-                minimumSize: const Size.fromHeight(54),
+                minimumSize: const Size.fromHeight(56),
                 backgroundColor: _isSharing ? Colors.redAccent : Colors.green,
                 foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
               ),
               onPressed: _isSharing ? _stopScreenShare : _startScreenShare,
             ),
@@ -687,23 +804,146 @@ class ParentLiveMonitor extends StatefulWidget {
 class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
   final TextEditingController _codeController = TextEditingController(text: 'KID-8429');
+  final SignalingService _signaling = SignalingService();
+
+  RTCPeerConnection? _peerConnection;
+  bool _isConnecting = false;
   bool _isConnected = false;
+  bool _hasRemoteVideo = false;
+  String _statusText = 'बच्चे का कोड डालकर कनेक्ट करें।';
+  String _iceState = 'None';
+  String _videoResolution = '0x0';
+
+  Timer? _candidatePollTimer;
+  int _lastCandidateTimestamp = 0;
+  bool _isRemoteDescSet = false;
+  final List<RTCIceCandidate> _queuedCandidates = [];
+
+  final Map<String, dynamic> _iceServers = {
+    'iceServers': [
+      {'urls': 'stun:stun.l.google.com:19302'},
+      {'urls': 'stun:stun1.l.google.com:19302'},
+      {'urls': 'stun:stun2.l.google.com:19302'},
+    ],
+    'sdpSemantics': 'unified-plan',
+  };
 
   @override
   void initState() {
     super.initState();
     _remoteRenderer.initialize();
+    _remoteRenderer.onResize = () {
+      debugPrint("📺 Video Resolution Received: \${_remoteRenderer.videoWidth}x\${_remoteRenderer.videoHeight}");
+      if (mounted) {
+        setState(() {
+          _videoResolution = '\${_remoteRenderer.videoWidth}x\${_remoteRenderer.videoHeight}';
+          if (_remoteRenderer.videoWidth > 0) _hasRemoteVideo = true;
+        });
+      }
+    };
   }
 
-  void _connectToChild() {
-    setState(() {
-      _isConnected = true;
+  // EXACT TIMING & UNIFIED PLAN BUG FIX:
+  Future<void> _connectToChild() async {
+    final roomCode = _codeController.text.trim().toUpperCase();
+    if (roomCode.isEmpty) return;
+
+    _disconnect();
+    setState(() { _isConnecting = true; _statusText = 'ऑफर खोज रहे हैं...'; });
+
+    try {
+      final offerData = await _signaling.getOffer(roomCode);
+      if (offerData == null || offerData['sdp'] == null) {
+        setState(() { _isConnecting = false; _statusText = '⚠️ बच्चे का लाइव स्क्रीन शेयर नहीं मिला।'; });
+        return;
+      }
+
+      _peerConnection = await createPeerConnection(_iceServers);
+
+      _peerConnection!.onIceConnectionState = (RTCIceConnectionState state) {
+        debugPrint("📡 ICE Connection State: \$state");
+        if (mounted) setState(() { _iceState = state.toString().split('.').last; });
+      };
+
+      // Unified Plan Bug Fix on Parent Side:
+      _peerConnection!.onTrack = (RTCTrackEvent event) async {
+        debugPrint("🔥 Track received: \${event.track.kind}, Streams count: \${event.streams.length}");
+        if (event.track.kind == 'video') {
+          if (event.streams.isNotEmpty) {
+            _remoteRenderer.srcObject = event.streams[0];
+          } else {
+            MediaStream newStream = await createLocalMediaStream('remoteVideoStream');
+            newStream.addTrack(event.track);
+            _remoteRenderer.srcObject = newStream;
+          }
+          if (mounted) setState(() { _hasRemoteVideo = true; _isConnected = true; _isConnecting = false; _statusText = '🟢 लाइव स्क्रीन चालू है!'; });
+        }
+      };
+
+      _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
+        if (candidate.candidate != null) {
+          _signaling.sendCandidate(roomCode, candidate.candidate!, candidate.sdpMid, candidate.sdpMLineIndex, 'parent');
+        }
+      };
+
+      // 1. Pehle Remote Description set hone ka wait karo
+      RTCSessionDescription offer = RTCSessionDescription(offerData['sdp'], offerData['type'] ?? 'offer');
+      await _peerConnection!.setRemoteDescription(offer);
+      _isRemoteDescSet = true;
+
+      // 2. Create and send Answer
+      RTCSessionDescription answer = await _peerConnection!.createAnswer({});
+      await _peerConnection!.setLocalDescription(answer);
+      await _signaling.sendAnswer(roomCode, answer.sdp!, answer.type!);
+
+      // 3. AB Kid ke ICE candidates listen karna start karo
+      _startListeningToKidIceCandidates(roomCode);
+    } catch (e) {
+      debugPrint('Parent connection error: \$e');
+      if (mounted) setState(() { _isConnecting = false; _statusText = 'त्रुटि: \$e'; });
+    }
+  }
+
+  void _startListeningToKidIceCandidates(String roomCode) {
+    _candidatePollTimer?.cancel();
+    _candidatePollTimer = Timer.periodic(const Duration(milliseconds: 1500), (timer) async {
+      if (_peerConnection == null) { timer.cancel(); return; }
+      final list = await _signaling.getCandidates(roomCode, 'parent', _lastCandidateTimestamp);
+      for (final item in list) {
+        final ts = item['timestamp'] as int? ?? 0;
+        if (ts > _lastCandidateTimestamp) _lastCandidateTimestamp = ts;
+        if (item['candidate'] != null) {
+          final candidate = RTCIceCandidate(item['candidate'], item['sdpMid'], item['sdpMLineIndex']);
+          if (_isRemoteDescSet) {
+            await _peerConnection!.addCandidate(candidate);
+          } else {
+            _queuedCandidates.add(candidate);
+          }
+        }
+      }
     });
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('बच्चे की लाइव स्क्रीन से जुड़ गए!')));
+  }
+
+  void _disconnect() {
+    _candidatePollTimer?.cancel();
+    try { _peerConnection?.close(); } catch (_) {}
+    _peerConnection = null;
+    _remoteRenderer.srcObject = null;
+    _isRemoteDescSet = false;
+    _queuedCandidates.clear();
+    if (mounted) {
+      setState(() {
+        _isConnected = false;
+        _isConnecting = false;
+        _hasRemoteVideo = false;
+        _statusText = 'डिस्कनेक्ट हो गया।';
+      });
+    }
   }
 
   @override
   void dispose() {
+    _disconnect();
     _remoteRenderer.dispose();
     _codeController.dispose();
     super.dispose();
@@ -712,7 +952,7 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('माता-पिता का लाइव मॉनिटर')),
+      appBar: AppBar(title: const Text('माता-पिता का लाइव मॉनिटर'), backgroundColor: const Color(0xFF1E293B)),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -722,32 +962,62 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
                 Expanded(
                   child: TextField(
                     controller: _codeController,
-                    decoration: const InputDecoration(
-                      labelText: 'बच्चे का 6-अंकीय कोड',
-                      border: OutlineInputBorder(),
+                    textCapitalization: TextCapitalization.characters,
+                    style: const TextStyle(fontWeight: FontWeight.bold, letterSpacing: 2),
+                    decoration: InputDecoration(
+                      labelText: 'बच्चे का कोड (उदा. KID-8429)',
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
                     ),
                   ),
                 ),
                 const SizedBox(width: 10),
                 ElevatedButton(
-                  onPressed: _connectToChild,
-                  child: const Text('कनेक्ट करें'),
+                  onPressed: _isConnecting ? null : _connectToChild,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF4F46E5),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  child: _isConnecting ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)) : const Text('कनेक्ट करें'),
                 ),
               ],
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(10)),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Expanded(child: Text(_statusText, style: const TextStyle(fontSize: 12, color: Colors.cyanAccent), overflow: TextOverflow.ellipsis)),
+                  Text('ICE: \$_iceState | Res: \$_videoResolution', style: const TextStyle(fontSize: 10, color: Colors.white60)),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            // FIX: SizedBox.expand prevents 0x0 size in Flutter RTCVideoView!
             Expanded(
               child: Container(
+                width: double.infinity,
                 decoration: BoxDecoration(
                   color: Colors.black,
                   borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.white24),
+                  border: Border.all(color: _hasRemoteVideo ? Colors.cyanAccent.withOpacity(0.5) : Colors.white24),
                 ),
-                child: _isConnected
-                    ? RTCVideoView(_remoteRenderer)
-                    : const Center(
-                        child: Text('बच्चे के फोन से सिग्नल की प्रतीक्षा...', textAlign: TextAlign.center),
-                      ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: (_isConnected || _hasRemoteVideo) && _remoteRenderer.srcObject != null
+                      ? SizedBox.expand(
+                          child: RTCVideoView(
+                            _remoteRenderer,
+                            objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                          ),
+                        )
+                      : Center(
+                          child: Text(_isConnecting ? 'सिग्नल की प्रतीक्षा...' : 'बच्चे का कोड डालकर कनेक्ट करें', textAlign: TextAlign.center),
+                        ),
+                ),
               ),
             ),
           ],

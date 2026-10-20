@@ -193,6 +193,22 @@ export const ParentView: React.FC<ParentViewProps> = ({
         setHasStream(false);
       }
     });
+
+    // Also connect via HTTP Signaling (enables watching Native Android Flutter APK devices)
+    peerManager.startHttpParentWatch(code, (remoteStream) => {
+      console.log('Received remote stream from HTTP signaling bridge!');
+      if (videoRef.current) {
+        videoRef.current.srcObject = remoteStream;
+        videoRef.current.muted = true;
+        videoRef.current.playsInline = true;
+        videoRef.current.play().catch((err) => {
+          console.warn('Video play prevented by browser policy:', err);
+        });
+      }
+      setHasStream(true);
+      setConnectionStatus('connected');
+      sounds.playChime();
+    });
   };
 
   // Auto connect if room param is present and not local demo

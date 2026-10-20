@@ -215,6 +215,7 @@ export const ChildView: React.FC<ChildViewProps> = ({
   const broadcastStreamToParent = (stream: MediaStream) => {
     const parentPeerId = `kg-${roomCode}-parent`;
     peerManager.callWithStream(parentPeerId, stream);
+    peerManager.startHttpChildBroadcast(roomCode, stream);
     onStreamActive(true, stream);
   };
 
@@ -728,103 +729,72 @@ export const ChildView: React.FC<ChildViewProps> = ({
             <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
               {t.roomCodeLabel}
             </span>
-            {isEditingCode ? (
-              <div className="space-y-2">
-                <div className="flex flex-wrap items-center justify-center md:justify-start gap-2">
+            {/* Directly Editable Pairing Code Box */}
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative flex-1 min-w-[200px]">
                   <input
                     type="text"
-                    value={customCodeInput}
+                    value={roomCode}
                     onChange={(e) => {
-                      setCustomCodeInput(e.target.value.toUpperCase());
-                      setEditError('');
-                    }}
-                    placeholder="उदा. MYCODE, 123456"
-                    className="px-3 py-2 bg-slate-950 border-2 border-indigo-500 rounded-xl font-mono text-xl tracking-wider uppercase text-white w-44 text-center focus:outline-hidden focus:ring-2 focus:ring-indigo-400"
-                    autoFocus
-                    maxLength={14}
-                  />
-                  <button
-                    onClick={() => {
-                      const clean = customCodeInput.trim().toUpperCase();
-                      if (clean.length < 3) {
-                        setEditError(lang === 'hi' ? 'कम से कम 3 अक्षर होने चाहिए' : 'Min 3 chars required');
-                        return;
-                      }
+                      const clean = e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, '');
                       onUpdateRoomCode?.(clean);
-                      setIsEditingCode(false);
-                      sounds.playChime();
+                      setBannerError(null);
                     }}
-                    className="px-3.5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition flex items-center gap-1 shadow-md cursor-pointer active:scale-95"
-                  >
-                    <Check className="w-4 h-4" />
-                    <span>{lang === 'hi' ? 'सेव करें' : 'Save'}</span>
-                  </button>
-                  <button
-                    onClick={() => {
-                      onRegenerateCode();
-                      setIsEditingCode(false);
-                    }}
-                    title={lang === 'hi' ? 'रैंडम कोड बनाएं' : 'Generate Random Code'}
-                    className="px-3 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition flex items-center gap-1 shadow-md cursor-pointer active:scale-95"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    <span>{lang === 'hi' ? 'रैंडम' : 'Random'}</span>
-                  </button>
-                  <button
-                    onClick={() => setIsEditingCode(false)}
-                    className="px-3 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-semibold cursor-pointer"
-                  >
-                    ✕
-                  </button>
-                </div>
-                {editError && (
-                  <p className="text-xs text-rose-400 font-medium">{editError}</p>
-                )}
-                <p className="text-[11px] text-slate-400">
-                  {lang === 'hi' ? 'अपनी पसंद का कोई भी आसान कोड या नंबर दर्ज करें।' : 'Enter any custom code or number you prefer.'}
-                </p>
-              </div>
-            ) : (
-              <div className="flex flex-wrap items-center justify-center md:justify-start gap-2.5">
-                <button
-                  onClick={() => {
-                    setCustomCodeInput(roomCode);
-                    setIsEditingCode(true);
-                  }}
-                  title={lang === 'hi' ? 'अपनी पसंद का कोड बदलने के लिए क्लिक करें' : 'Click to customize pairing code'}
-                  className="group flex items-center gap-2.5 px-3.5 py-1.5 rounded-2xl bg-slate-950/90 hover:bg-slate-800 border-2 border-indigo-500/50 hover:border-indigo-400 transition-all shadow-md cursor-pointer active:scale-95"
-                >
-                  <span className="text-3xl sm:text-4xl font-extrabold tracking-widest font-mono text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-indigo-300 to-cyan-300 group-hover:scale-105 transition-transform">
-                    {roomCode}
-                  </span>
-                  <div className="flex items-center gap-1 px-2 py-0.5 rounded-lg bg-indigo-500/20 text-indigo-300 text-[10px] font-bold uppercase tracking-wider group-hover:bg-indigo-500 group-hover:text-white transition">
-                    <Edit3 className="w-3 h-3" />
-                    <span>{lang === 'hi' ? 'बदलें' : 'Edit'}</span>
+                    placeholder="उदा. KID-8429"
+                    maxLength={16}
+                    className="w-full px-4 py-3 bg-slate-950/90 border-2 border-indigo-500/70 hover:border-cyan-400 focus:border-cyan-400 rounded-2xl font-mono text-2xl sm:text-3xl font-extrabold tracking-widest text-center uppercase text-cyan-300 focus:outline-hidden focus:ring-2 focus:ring-cyan-400/40 shadow-inner transition cursor-text"
+                    title={lang === 'hi' ? 'अपनी पसंद का कोई भी कोड यहाँ टाइप करें' : 'Type any custom code here'}
+                  />
+                  <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-slate-500 text-[10px] font-bold uppercase hidden sm:block">
+                    {lang === 'hi' ? '✏️ क्लिक कर टाइप करें' : '✏️ Tap to edit'}
                   </div>
-                </button>
+                </div>
 
+                {/* Copy button */}
                 <button
                   onClick={copyRoomCode}
                   title={t.copyCode}
-                  className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 transition active:scale-95 border border-slate-700 cursor-pointer"
+                  className="p-3.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-200 transition active:scale-95 border border-slate-700 cursor-pointer shadow-md"
                 >
-                  {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                  {copied ? <Check className="w-5 h-5 text-emerald-400" /> : <Copy className="w-5 h-5" />}
                 </button>
 
+                {/* Random button */}
                 <button
-                  onClick={onRegenerateCode}
+                  onClick={() => {
+                    onRegenerateCode();
+                    sounds.playChime();
+                  }}
                   title={lang === 'hi' ? 'नया रैंडम कोड बनाएं' : 'Generate new random code'}
-                  className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 transition border border-slate-700 cursor-pointer active:rotate-180"
+                  className="p-3.5 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white transition border border-indigo-400 cursor-pointer active:rotate-180 shadow-md flex items-center gap-1.5 font-bold text-xs"
                 >
-                  <RefreshCw className="w-4 h-4" />
+                  <RefreshCw className="w-5 h-5" />
+                  <span className="hidden sm:inline">{lang === 'hi' ? 'नया कोड' : 'Random'}</span>
                 </button>
               </div>
-            )}
-            <p className="text-xs text-slate-300 max-w-sm leading-relaxed">
-              {lang === 'hi'
-                ? '📱 माता-पिता के फोन से यह सामने दिख रहा QR कोड स्कैन करें या 6-अंकीय कोड दर्ज करें।'
-                : '📱 Scan this QR code with parent device camera or enter the 6-digit code to watch live.'}
-            </p>
+
+              {/* Quick preset chips */}
+              <div className="flex flex-wrap items-center gap-2 pt-1 text-xs">
+                <span className="text-slate-400 text-[11px] font-medium">{lang === 'hi' ? 'त्वरित कोड:' : 'Presets:'}</span>
+                {['KID-8429', '123456', 'KID-1001', 'MYKID'].map((preset) => (
+                  <button
+                    key={preset}
+                    onClick={() => {
+                      onUpdateRoomCode?.(preset);
+                      sounds.playChime();
+                    }}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold transition cursor-pointer border ${
+                      roomCode === preset
+                        ? 'bg-cyan-500/20 text-cyan-300 border-cyan-400/50'
+                        : 'bg-slate-950/60 text-slate-400 border-slate-800 hover:bg-slate-800 hover:text-white'
+                    }`}
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
 
           {/* Prominent Directly Visible QR Code */}
