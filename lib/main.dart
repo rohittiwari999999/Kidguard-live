@@ -4,6 +4,7 @@
 // Crash-proof implementation with Android 13/14 Foreground Service MediaProjection support
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
@@ -127,6 +128,7 @@ class ChildScreenCapture extends StatefulWidget {
 }
 
 class _ChildScreenCaptureState extends State<ChildScreenCapture> {
+  static const MethodChannel _platformChannel = MethodChannel('com.example.kidguard_live/screen_capture');
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   MediaStream? _screenStream;
   bool _isSharing = false;
@@ -164,8 +166,8 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
 
   Future<void> _startScreenShare() async {
     try {
-      // 1. Request Android Notification Permission (CRITICAL for Android 13+)
-      // Without notification permission, Android 13/14 rejects Foreground Service and crashes with SecurityException!
+      // 1. Android 13/14/15/16: Request Notification Permission FIRST
+      // Crucial: without notification permission, foreground service cannot start on modern Android
       final notifStatus = await Permission.notification.request();
       debugPrint('Notification permission status: $notifStatus');
 
@@ -175,30 +177,45 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         Permission.microphone,
       ].request();
 
-      // 3. Start Foreground Service BEFORE requesting screen capture
-      // Android 14 STRICT REQUIREMENT: FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION must already be running!
-      if (await FlutterForegroundTask.isRunningService == false) {
-        await FlutterForegroundTask.startService(
-          notificationTitle: 'KidGuard Live Streaming',
-          notificationText: 'स्क्रीन माता-पिता के फोन पर प्रसारित हो रही है',
-          callback: startCallback,
-        );
+      // 3. Android 14/15/16 NATIVE FLOW:
+      // Calls MainActivity -> MediaProjectionManager.createScreenCaptureIntent()
+      // Once granted, MainActivity starts ScreenCaptureService with FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+      // and registers MediaProjection.Callback to avoid IllegalStateException!
+      try {
+        final bool? nativeSuccess = await _platformChannel.invokeMethod<bool>('startScreenCapture');
+        if (nativeSuccess == true) {
+          if (mounted) {
+            setState(() {
+              _isSharing = true;
+            });
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('✅ Android 14/15/16 Native स्क्रीन शेयरिंग शुरू हो गई है!'),
+                backgroundColor: Colors.green,
+              ),
+            );
+          }
+          return;
+        }
+      } on PlatformException catch (pe) {
+        if (pe.code == 'CANCELLED') {
+          // User clicked Cancel in system dialog, do not error
+          return;
+        }
+        debugPrint('Native screen capture error, falling back: $pe');
+      } on MissingPluginException {
+        debugPrint('Native MethodChannel not found (e.g. running on web), falling back to WebRTC');
       }
 
-      // Small delay to ensure Android OS registers the foreground service
-      await Future.delayed(const Duration(milliseconds: 300));
-
-      // 4. Safe screen capture constraints (NO invalid facingMode)
+      // 4. Fallback WebRTC getDisplayMedia (for web or environments without native service)
       final mediaConstraints = <String, dynamic>{
         'audio': false,
         'video': true,
       };
 
-      // Native Android Screen Capture via MediaProjection
       MediaStream stream = await navigator.mediaDevices.getDisplayMedia(mediaConstraints);
       _screenStream = stream;
 
-      // Handle when screen capture ends from Android status bar
       stream.getVideoTracks().forEach((track) {
         track.onEnded = () {
           if (mounted) {
@@ -207,9 +224,11 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         };
       });
 
-      setState(() {
-        _isSharing = true;
-      });
+      if (mounted) {
+        setState(() {
+          _isSharing = true;
+        });
+      }
     } catch (e) {
       debugPrint('Screen capture error caught safely: $e');
       if (mounted) {
@@ -223,10 +242,15 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
     }
   }
 
-  void _stopScreenShare() {
+  void _stopScreenShare() async {
+    try {
+      await _platformChannel.invokeMethod('stopScreenCapture');
+    } catch (_) {}
     _screenStream?.getTracks().forEach((track) => track.stop());
     _screenStream = null;
-    FlutterForegroundTask.stopService();
+    try {
+      FlutterForegroundTask.stopService();
+    } catch (_) {}
     if (mounted) {
       setState(() {
         _isSharing = false;

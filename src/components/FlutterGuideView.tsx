@@ -280,6 +280,7 @@ flutter {
   const mainDartCode = `// lib/main.dart
 // KidGuard Live - Full Native Flutter Android Screen Monitoring
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
@@ -438,31 +439,43 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
     );
   }
 
+  static const MethodChannel _platformChannel = MethodChannel('com.example.kidguard_live/screen_capture');
+
   Future<void> _startScreenShare() async {
     try {
-      // 1. Android 13+ Notification Permission (Mandatory for Foreground Service)
+      // 1. Android 13/14/15/16 Notification Permission (Mandatory for Foreground Service)
       await Permission.notification.request();
 
       // 2. Request Camera & Mic
       await [Permission.camera, Permission.microphone].request();
 
-      // 3. Start Foreground Service BEFORE MediaProjection (Android 14 Requirement)
-      if (await FlutterForegroundTask.isRunningService == false) {
-        await FlutterForegroundTask.startService(
-          notificationTitle: 'KidGuard Live Streaming',
-          notificationText: 'स्क्रीन माता-पिता के फोन पर प्रसारित हो रही है',
-          callback: startCallback,
-        );
-      }
+      // 3. Android 14/15/16 Native Screen Capture via MainActivity & ScreenCaptureService
+      try {
+        final bool? nativeSuccess = await _platformChannel.invokeMethod<bool>('startScreenCapture');
+        if (nativeSuccess == true) {
+          if (mounted) {
+            setState(() {
+              _isSharing = true;
+            });
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('✅ Native Android 14/15/16 स्क्रीन शेयरिंग शुरू हो गई!'),
+                backgroundColor: Colors.green,
+              ),
+            );
+          }
+          return;
+        }
+      } on PlatformException catch (pe) {
+        if (pe.code == 'CANCELLED') return;
+      } on MissingPluginException {}
 
-      await Future.delayed(const Duration(milliseconds: 300));
-
+      // Fallback WebRTC
       final mediaConstraints = <String, dynamic>{
         'audio': false,
         'video': true,
       };
 
-      // Native Android Screen Capture via MediaProjection
       MediaStream stream = await navigator.mediaDevices.getDisplayMedia(mediaConstraints);
       _screenStream = stream;
 
@@ -472,23 +485,34 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         };
       });
 
-      setState(() {
-        _isSharing = true;
-      });
+      if (mounted) {
+        setState(() {
+          _isSharing = true;
+        });
+      }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Screen capture error: \$e')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('सूचना: \$e'), backgroundColor: Colors.redAccent),
+        );
       }
     }
   }
 
-  void _stopScreenShare() {
+  void _stopScreenShare() async {
+    try {
+      await _platformChannel.invokeMethod('stopScreenCapture');
+    } catch (_) {}
     _screenStream?.getTracks().forEach((track) => track.stop());
     _screenStream = null;
-    FlutterForegroundTask.stopService();
-    setState(() {
-      _isSharing = false;
-    });
+    try {
+      FlutterForegroundTask.stopService();
+    } catch (_) {}
+    if (mounted) {
+      setState(() {
+        _isSharing = false;
+      });
+    }
   }
 
   @override
