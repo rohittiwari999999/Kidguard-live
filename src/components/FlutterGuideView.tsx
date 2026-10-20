@@ -238,9 +238,10 @@ flutter {
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
-    <!-- Android 14+ MediaProjection Foreground Service Permissions -->
+    <!-- Android 13+ & Android 14+ MediaProjection Foreground Service Permissions -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
@@ -416,35 +417,38 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
 
   Future<void> _startScreenShare() async {
     try {
-      final permStatuses = await [
-        Permission.camera,
-        Permission.microphone,
-      ].request();
+      // 1. Android 13+ Notification Permission (Mandatory for Foreground Service)
+      await Permission.notification.request();
 
-      // 2. Start Foreground Service (Required by Android 14+ for MediaProjection)
+      // 2. Request Camera & Mic
+      await [Permission.camera, Permission.microphone].request();
+
+      // 3. Start Foreground Service BEFORE MediaProjection (Android 14 Requirement)
       if (await FlutterForegroundTask.isRunningService == false) {
         await FlutterForegroundTask.startService(
+          serviceId: 256,
           notificationTitle: 'KidGuard Live Streaming',
           notificationText: 'स्क्रीन माता-पिता के फोन पर प्रसारित हो रही है',
+          callback: startCallback,
         );
       }
 
+      await Future.delayed(const Duration(milliseconds: 300));
+
       final mediaConstraints = <String, dynamic>{
         'audio': false,
-        'video': {
-          'mandatory': {
-            'minWidth': '720',
-            'minHeight': '1280',
-            'minFrameRate': '30',
-          },
-          'facingMode': 'user',
-          'optional': [],
-        }
+        'video': true,
       };
 
       // Native Android Screen Capture via MediaProjection
       MediaStream stream = await navigator.mediaDevices.getDisplayMedia(mediaConstraints);
       _screenStream = stream;
+
+      stream.getVideoTracks().forEach((track) {
+        track.onEnded = () {
+          if (mounted) _stopScreenShare();
+        };
+      });
 
       setState(() {
         _isSharing = true;

@@ -22,7 +22,8 @@ import {
   MicOff,
   Monitor,
   AlertCircle,
-  KeyRound
+  KeyRound,
+  ArrowRight
 } from 'lucide-react';
 import { QRCodeDisplay } from './QRCodeDisplay';
 import { PeerManager } from '../services/peerManager';
@@ -508,6 +509,33 @@ export const ChildView: React.FC<ChildViewProps> = ({
           </button>
         </div>
       )}
+
+      {/* Clear Android vs Chrome Device Notice */}
+      <div className="mb-6 p-4 rounded-2xl bg-gradient-to-r from-blue-950/70 via-indigo-950/40 to-slate-900 border border-blue-500/30 text-xs shadow-lg space-y-2">
+        <div className="flex items-center gap-2 text-cyan-300 font-bold">
+          <Smartphone className="w-4 h-4 shrink-0" />
+          <span>{lang === 'hi' ? 'आपका फोन Android है, लेकिन यह लिंक Chrome ब्राउज़र में खुला है:' : 'Your device is Android, but running inside Chrome Browser:'}</span>
+        </div>
+        <p className="text-slate-300 leading-relaxed text-[11px]">
+          {lang === 'hi'
+            ? 'क्योंकि यह एक वेब लिंक है, इसलिए आपका फोन इसे Google Chrome ब्राउज़र में खोलता है। Android का सुरक्षा नियम है कि Chrome ब्राउज़र बैकग्राउंड में स्क्रीन रिकॉर्ड नहीं कर सकता (मिनिमाइज़ या बंद हो जाता है)।'
+            : 'Because this is a web URL, your Android phone opened it in Google Chrome. Android security policy restricts web browsers from capturing screen in background.'}
+        </p>
+        <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px]">
+          <span className="text-emerald-400 font-semibold">
+            {lang === 'hi' ? '✅ बिना Chrome के 24/7 स्क्रीन शेयर चलाने के लिए:' : '✅ To run 24/7 without Chrome:'}
+          </span>
+          {onSelectRole && (
+            <button
+              onClick={() => onSelectRole('flutter-guide')}
+              className="px-3 py-1 bg-cyan-600/30 hover:bg-cyan-600/50 text-cyan-200 border border-cyan-500/40 rounded-lg font-bold transition flex items-center gap-1.5 cursor-pointer shadow-xs active:scale-95"
+            >
+              <span>{lang === 'hi' ? '📱 असली Android APK (.apk) इनस्टॉल करें' : '📱 Install Real Android APK'}</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+      </div>
 
       {/* Main Card */}
       <div className="bg-slate-900/80 border border-slate-800 backdrop-blur-md rounded-3xl p-6 shadow-2xl">

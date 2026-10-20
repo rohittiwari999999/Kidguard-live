@@ -1,6 +1,7 @@
 // lib/main.dart
 // KidGuard Live - Full Flutter Mobile Application
 // Captures Child's Android Screen via MediaProjection and streams to Parent's Phone
+// Crash-proof implementation with Android 13/14 Foreground Service MediaProjection support
 
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -8,7 +9,29 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'dart:async';
 
+// Top-level entry point required by flutter_foreground_task v6.x
+@pragma('vm:entry-point')
+void startCallback() {
+  FlutterForegroundTask.setTaskHandler(ScreenBroadcastTaskHandler());
+}
+
+class ScreenBroadcastTaskHandler extends TaskHandler {
+  @override
+  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
+    debugPrint("KidGuard ScreenBroadcastTaskHandler started");
+  }
+
+  @override
+  Future<void> onRepeatEvent(DateTime timestamp) async {}
+
+  @override
+  Future<void> onDestroy(DateTime timestamp) async {
+    debugPrint("KidGuard ScreenBroadcastTaskHandler destroyed");
+  }
+}
+
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
   runApp(const KidGuardApp());
 }
 
@@ -93,7 +116,7 @@ class RoleSelectionScreen extends StatelessWidget {
 }
 
 // -------------------------------------------------------------
-// 1. CHILD SCREEN CAPTURE (Uses Android MediaProjection)
+// 1. CHILD SCREEN CAPTURE (Uses Android MediaProjection Foreground Service)
 // -------------------------------------------------------------
 class ChildScreenCapture extends StatefulWidget {
   const ChildScreenCapture({super.key});
@@ -128,9 +151,8 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         showNotification: false,
         playSound: false,
       ),
-      foregroundTaskOptions: const ForegroundTaskOptions(
-        interval: 5000,
-        isOnceEvent: false,
+      foregroundTaskOptions: ForegroundTaskOptions(
+        eventAction: ForegroundTaskEventAction.repeat(5000),
         autoRunOnBoot: false,
         allowWakeLock: true,
         allowWifiLock: true,
@@ -140,51 +162,62 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
 
   Future<void> _startScreenShare() async {
     try {
-      // 1. Explicitly request Android permissions for Camera & Microphone
-      final permStatuses = await [
+      // 1. Request Android Notification Permission (CRITICAL for Android 13+)
+      // Without notification permission, Android 13/14 rejects Foreground Service and crashes with SecurityException!
+      final notifStatus = await Permission.notification.request();
+      debugPrint('Notification permission status: $notifStatus');
+
+      // 2. Request Camera & Mic Permissions
+      await [
         Permission.camera,
         Permission.microphone,
       ].request();
 
-      if (permStatuses[Permission.camera]?.isDenied ?? false) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('कैमरा और माइक अनुमति आवश्यक है (Permissions Required)')),
-          );
-        }
-      }
-
-      // 2. Start Foreground Service (Required by Android 14+ for MediaProjection)
+      // 3. Start Foreground Service BEFORE requesting screen capture
+      // Android 14 STRICT REQUIREMENT: FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION must already be running!
       if (await FlutterForegroundTask.isRunningService == false) {
         await FlutterForegroundTask.startService(
+          serviceId: 256,
           notificationTitle: 'KidGuard Live Streaming',
           notificationText: 'स्क्रीन माता-पिता के फोन पर प्रसारित हो रही है',
+          callback: startCallback,
         );
       }
 
+      // Small delay to ensure Android OS registers the foreground service
+      await Future.delayed(const Duration(milliseconds: 300));
+
+      // 4. Safe screen capture constraints (NO invalid facingMode)
       final mediaConstraints = <String, dynamic>{
         'audio': false,
-        'video': {
-          'mandatory': {
-            'minWidth': '720',
-            'minHeight': '1280',
-            'minFrameRate': '30',
-          },
-          'facingMode': 'user',
-          'optional': [],
-        }
+        'video': true,
       };
 
       // Native Android Screen Capture via MediaProjection
       MediaStream stream = await navigator.mediaDevices.getDisplayMedia(mediaConstraints);
       _screenStream = stream;
 
+      // Handle when screen capture ends from Android status bar
+      stream.getVideoTracks().forEach((track) {
+        track.onEnded = () {
+          if (mounted) {
+            _stopScreenShare();
+          }
+        };
+      });
+
       setState(() {
         _isSharing = true;
       });
     } catch (e) {
+      debugPrint('Screen capture error caught safely: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Screen capture error: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('स्क्रीन शेयर सूचना: $e'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
       }
     }
   }
@@ -193,9 +226,11 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
     _screenStream?.getTracks().forEach((track) => track.stop());
     _screenStream = null;
     FlutterForegroundTask.stopService();
-    setState(() {
-      _isSharing = false;
-    });
+    if (mounted) {
+      setState(() {
+        _isSharing = false;
+      });
+    }
   }
 
   @override

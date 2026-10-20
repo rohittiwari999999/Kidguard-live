@@ -238,9 +238,17 @@ export const ParentView: React.FC<ParentViewProps> = ({
 
     try {
       const stream = video.srcObject as MediaStream;
-      const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: 'video/webm;codecs=vp8',
-      });
+      let options: MediaRecorderOptions = {};
+      if (typeof MediaRecorder !== 'undefined' && typeof MediaRecorder.isTypeSupported === 'function') {
+        if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')) {
+          options = { mimeType: 'video/webm;codecs=vp8,opus' };
+        } else if (MediaRecorder.isTypeSupported('video/webm')) {
+          options = { mimeType: 'video/webm' };
+        } else if (MediaRecorder.isTypeSupported('video/mp4')) {
+          options = { mimeType: 'video/mp4' };
+        }
+      }
+      const mediaRecorder = new MediaRecorder(stream, options);
       recordedChunksRef.current = [];
 
       mediaRecorder.ondataavailable = (event) => {

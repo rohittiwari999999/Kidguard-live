@@ -48,7 +48,7 @@ export const QRScannerModal: React.FC<QRScannerModalProps> = ({
       setStream(mediaStream);
       if (videoRef.current) {
         videoRef.current.srcObject = mediaStream;
-        videoRef.current.play();
+        videoRef.current.play().catch(() => {});
       }
 
       // Start scanning loop
