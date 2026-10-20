@@ -8,6 +8,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'dart:async';
+import 'dart:isolate';
 
 // Top-level entry point required by flutter_foreground_task v6.x
 @pragma('vm:entry-point')
@@ -17,15 +18,15 @@ void startCallback() {
 
 class ScreenBroadcastTaskHandler extends TaskHandler {
   @override
-  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
+  void onStart(DateTime timestamp, SendPort? sendPort) async {
     debugPrint("KidGuard ScreenBroadcastTaskHandler started");
   }
 
   @override
-  Future<void> onRepeatEvent(DateTime timestamp) async {}
+  void onRepeatEvent(DateTime timestamp, SendPort? sendPort) async {}
 
   @override
-  Future<void> onDestroy(DateTime timestamp) async {
+  void onDestroy(DateTime timestamp, SendPort? sendPort) async {
     debugPrint("KidGuard ScreenBroadcastTaskHandler destroyed");
   }
 }
@@ -151,8 +152,9 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         showNotification: false,
         playSound: false,
       ),
-      foregroundTaskOptions: ForegroundTaskOptions(
-        eventAction: ForegroundTaskEventAction.repeat(5000),
+      foregroundTaskOptions: const ForegroundTaskOptions(
+        interval: 5000,
+        isOnceEvent: false,
         autoRunOnBoot: false,
         allowWakeLock: true,
         allowWifiLock: true,
@@ -177,7 +179,6 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       // Android 14 STRICT REQUIREMENT: FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION must already be running!
       if (await FlutterForegroundTask.isRunningService == false) {
         await FlutterForegroundTask.startService(
-          serviceId: 256,
           notificationTitle: 'KidGuard Live Streaming',
           notificationText: 'स्क्रीन माता-पिता के फोन पर प्रसारित हो रही है',
           callback: startCallback,
