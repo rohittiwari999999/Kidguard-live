@@ -33,7 +33,7 @@ export const Navbar: React.FC<NavbarProps> = ({
       <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-2 sm:gap-4">
         {/* Brand */}
         <div 
-          onClick={() => onSelectRole('split-demo')}
+          onClick={() => onSelectRole('parent')}
           className="flex items-center gap-2.5 cursor-pointer group"
         >
           <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-cyan-500 flex items-center justify-center text-white shadow-lg shadow-indigo-500/25 group-hover:scale-105 transition">
@@ -85,21 +85,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             <span>{t.childMode}</span>
           </button>
 
-          {/* Demo Split Mode */}
-          <button
-            onClick={() => onSelectRole('split-demo')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition whitespace-nowrap ${
-              currentRole === 'split-demo'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
-                : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
-            }`}
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">{t.splitDemo}</span>
-            <span className="md:hidden">डेमो</span>
-          </button>
-
-          {/* Flutter Guide */}
+          {/* Android APK Guide */}
           <button
             onClick={() => onSelectRole('flutter-guide')}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition whitespace-nowrap ${
@@ -108,9 +94,11 @@ export const Navbar: React.FC<NavbarProps> = ({
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
             }`}
           >
-            <Code2 className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">{t.flutterGuide}</span>
-            <span className="md:hidden">Flutter</span>
+            <Smartphone className="w-3.5 h-3.5 text-cyan-400" />
+            <span>{lang === 'hi' ? '📱 असली Android APK' : '📱 Android APK'}</span>
+            <span className="hidden sm:inline-block px-1.5 py-0.2 text-[9px] bg-cyan-500/20 text-cyan-300 rounded font-semibold border border-cyan-500/30">
+              {lang === 'hi' ? '24x7 बैकग्राउंड' : '24x7 BG'}
+            </span>
           </button>
         </nav>
 

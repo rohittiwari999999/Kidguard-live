@@ -413,10 +413,17 @@ export const ParentView: React.FC<ParentViewProps> = ({
                     : 'Open this app on child device and click "Start Screen Share". Then ensure the pairing code matches above.'}
                 </p>
 
-                <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+                {/* Helpful Android Tip */}
+                <div className="mt-3 px-3 py-2 rounded-xl bg-slate-900/90 border border-slate-800 text-[11px] text-cyan-300 max-w-md">
+                  {lang === 'hi'
+                    ? '💡 नोट: यदि बच्चा दूसरा ऐप खोलता है, तो Android ब्राउज़र स्क्रीन शेयर रोक देता है। 24/7 बिना रुके स्क्रीन देखने के लिए ऊपर "📱 असली Android APK" टैब से APK लगाएं।'
+                    : '💡 Note: Switching apps on Android pauses browser streaming. Use our "Real Android APK" for 24/7 background streaming.'}
+                </div>
+
+                <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
                   <button
                     onClick={() => handleConnect(inputCode)}
-                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-xl transition shadow"
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-xl transition shadow cursor-pointer active:scale-95"
                   >
                     {lang === 'hi' ? 'पुनः प्रयास करें (Retry)' : 'Retry Connection'}
                   </button>

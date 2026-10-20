@@ -1,4 +1,4 @@
-export type DeviceRole = 'parent' | 'child' | 'split-demo' | 'flutter-guide';
+export type DeviceRole = 'parent' | 'child' | 'flutter-guide';
 
 export type Language = 'hi' | 'en';
 
@@ -31,5 +31,3 @@ export interface BuzzerAlert {
   sender: 'parent';
   acknowledged?: boolean;
 }
-
-export type SimulatedAppType = 'youtube' | 'game' | 'chat' | 'homework' | 'browser';

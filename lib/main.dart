@@ -5,6 +5,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'dart:async';
 
 void main() {
@@ -111,6 +112,30 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
   void initState() {
     super.initState();
     _localRenderer.initialize();
+    _initForegroundTask();
+  }
+
+  void _initForegroundTask() {
+    FlutterForegroundTask.init(
+      androidNotificationOptions: AndroidNotificationOptions(
+        channelId: 'kidguard_screen_capture',
+        channelName: 'KidGuard Screen Broadcast',
+        channelDescription: 'Screen streaming foreground service',
+        channelImportance: NotificationChannelImportance.LOW,
+        priority: NotificationPriority.LOW,
+      ),
+      iosNotificationOptions: const IOSNotificationOptions(
+        showNotification: false,
+        playSound: false,
+      ),
+      foregroundTaskOptions: const ForegroundTaskOptions(
+        interval: 5000,
+        isOnceEvent: false,
+        autoRunOnBoot: false,
+        allowWakeLock: true,
+        allowWifiLock: true,
+      ),
+    );
   }
 
   Future<void> _startScreenShare() async {
@@ -127,6 +152,14 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
             const SnackBar(content: Text('कैमरा और माइक अनुमति आवश्यक है (Permissions Required)')),
           );
         }
+      }
+
+      // 2. Start Foreground Service (Required by Android 14+ for MediaProjection)
+      if (await FlutterForegroundTask.isRunningService == false) {
+        await FlutterForegroundTask.startService(
+          notificationTitle: 'KidGuard Live Streaming',
+          notificationText: 'स्क्रीन माता-पिता के फोन पर प्रसारित हो रही है',
+        );
       }
 
       final mediaConstraints = <String, dynamic>{
@@ -159,6 +192,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
   void _stopScreenShare() {
     _screenStream?.getTracks().forEach((track) => track.stop());
     _screenStream = null;
+    FlutterForegroundTask.stopService();
     setState(() {
       _isSharing = false;
     });

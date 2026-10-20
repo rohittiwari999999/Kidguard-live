@@ -4,8 +4,7 @@ export const translations = {
     tagline: "बच्चे की स्क्रीन अपने मोबाइल से लाइव देखें",
     parentMode: "माता-पिता का फोन (Parent)",
     childMode: "बच्चे का फोन (Child)",
-    splitDemo: "लाइव डेमो टेस्ट (Demo)",
-    flutterGuide: "Flutter ऐप कोड (Code)",
+    flutterGuide: "📱 असली Android APK",
     language: "भाषा / Language",
     
     // Child Screen
@@ -19,9 +18,8 @@ export const translations = {
     stopSharing: "स्क्रीन शेयरिंग बंद करें (Stop)",
     screenActiveNotice: "स्क्रीन शेयरिंग चालू है! माता-पिता इसे लाइव देख रहे हैं।",
     selectMode: "शेयरिंग का प्रकार चुनें:",
-    modeRealScreen: "असली स्क्रीन (Real Device Screen)",
+    modeRealScreen: "असली स्क्रीन (Real Phone Screen)",
     modeCamera: "कैमरा व्यू (Front/Back Camera)",
-    modeSimulation: "सिमुलेशन एक्टिविटी (YouTube/Game Demo)",
     lockWithPin: "PIN से लॉक करें (ताकि बच्चा बंद न कर सके)",
     unlockWithPin: "अनलॉक करने के लिए PIN दर्ज करें",
     pinPlaceholder: "4-अंकों का PIN (उदा: 1234)",
@@ -68,8 +66,7 @@ export const translations = {
     tagline: "Monitor child's live screen activity from your mobile",
     parentMode: "Parent Phone",
     childMode: "Child's Phone",
-    splitDemo: "Live Split Demo",
-    flutterGuide: "Flutter Mobile Code",
+    flutterGuide: "📱 Real Android APK",
     language: "Language",
     
     // Child Screen
@@ -85,7 +82,6 @@ export const translations = {
     selectMode: "Select Stream Source:",
     modeRealScreen: "Real Screen (DisplayMedia)",
     modeCamera: "Camera Feed",
-    modeSimulation: "Simulated Kid Apps (Demo)",
     lockWithPin: "Lock with Parent PIN (Prevent child closing)",
     unlockWithPin: "Enter PIN to unlock",
     pinPlaceholder: "4-digit PIN (e.g. 1234)",

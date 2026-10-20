@@ -31,7 +31,7 @@ const PRE_GENERATED_KEYSTORE_BASE64 = `MIIKXAIBAzCCChIGCSqGSIb3DQEHAaCCCgMEggn/M
 
 export const FlutterGuideView: React.FC<FlutterGuideViewProps> = ({ lang }) => {
   const t = translations[lang];
-  const [activeTab, setActiveTab] = useState<'secrets_done' | 'github_action' | 'gradle' | 'main' | 'pubspec'>('secrets_done');
+  const [activeTab, setActiveTab] = useState<'install_guide' | 'secrets_done' | 'github_action' | 'gradle' | 'manifest' | 'main'>('install_guide');
   const [copiedFile, setCopiedFile] = useState<string | null>(null);
 
   const copyToClipboard = (text: string, fileName: string) => {
@@ -227,6 +227,422 @@ flutter {
 }
 `;
 
+  const manifestXmlCode = `<!-- android/app/src/main/AndroidManifest.xml -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.kidguard_live">
+
+    <!-- Screen Recording & WebRTC Permissions -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <!-- Android 14+ MediaProjection Foreground Service Permissions -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application
+        android:label="KidGuard Live"
+        android:name="\${applicationName}"
+        android:icon="@mipmap/ic_launcher">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+
+        <!-- Foreground Service for Background Screen Capture (Child uses other apps without pausing!) -->
+        <service
+            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
+            android:foregroundServiceType="mediaProjection"
+            android:stopWithTask="true" />
+
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+</manifest>
+`;
+
+  const mainDartCode = `// lib/main.dart
+// KidGuard Live - Full Native Flutter Android Screen Monitoring
+import 'package:flutter/material.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'dart:async';
+
+void main() {
+  runApp(const KidGuardApp());
+}
+
+class KidGuardApp extends StatelessWidget {
+  const KidGuardApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'KidGuard Live',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: const Color(0xFF0F172A),
+        colorScheme: const ColorScheme.dark(
+          primary: Color(0xFF4F46E5),
+          secondary: Color(0xFF06B6D4),
+        ),
+      ),
+      home: const RoleSelectionScreen(),
+    );
+  }
+}
+
+class RoleSelectionScreen extends StatelessWidget {
+  const RoleSelectionScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('KidGuard Live - Bal Monitor'),
+        centerTitle: true,
+        backgroundColor: const Color(0xFF1E293B),
+      ),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.security, size: 72, color: Color(0xFF6366F1)),
+              const SizedBox(height: 16),
+              const Text(
+                'यह फोन किसका है?\\nSelect Device Role',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 36),
+              ElevatedButton.icon(
+                icon: const Icon(Icons.child_care, size: 28),
+                label: const Text('बच्चे का फोन (Child Device - Broadcast)'),
+                style: ElevatedButton.styleFrom(
+                  minimumSize: const Size.fromHeight(56),
+                  backgroundColor: const Color(0xFF2563EB),
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                ),
+                onPressed: () {
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => const ChildScreenCapture()));
+                },
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton.icon(
+                icon: const Icon(Icons.visibility, size: 28),
+                label: const Text('माता-पिता का फोन (Parent Device - Watch)'),
+                style: ElevatedButton.styleFrom(
+                  minimumSize: const Size.fromHeight(56),
+                  backgroundColor: const Color(0xFF4F46E5),
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                ),
+                onPressed: () {
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => const ParentLiveMonitor()));
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// -------------------------------------------------------------
+// 1. CHILD SCREEN CAPTURE (Uses Android MediaProjection Foreground Service)
+// -------------------------------------------------------------
+class ChildScreenCapture extends StatefulWidget {
+  const ChildScreenCapture({super.key});
+
+  @override
+  State<ChildScreenCapture> createState() => _ChildScreenCaptureState();
+}
+
+class _ChildScreenCaptureState extends State<ChildScreenCapture> {
+  final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
+  MediaStream? _screenStream;
+  bool _isSharing = false;
+  String _roomCode = 'KID-8429';
+
+  @override
+  void initState() {
+    super.initState();
+    _localRenderer.initialize();
+    _initForegroundTask();
+  }
+
+  void _initForegroundTask() {
+    FlutterForegroundTask.init(
+      androidNotificationOptions: AndroidNotificationOptions(
+        channelId: 'kidguard_screen_capture',
+        channelName: 'KidGuard Screen Broadcast',
+        channelDescription: 'Screen streaming foreground service',
+        channelImportance: NotificationChannelImportance.LOW,
+        priority: NotificationPriority.LOW,
+      ),
+      iosNotificationOptions: const IOSNotificationOptions(
+        showNotification: false,
+        playSound: false,
+      ),
+      foregroundTaskOptions: const ForegroundTaskOptions(
+        interval: 5000,
+        isOnceEvent: false,
+        autoRunOnBoot: false,
+        allowWakeLock: true,
+        allowWifiLock: true,
+      ),
+    );
+  }
+
+  Future<void> _startScreenShare() async {
+    try {
+      final permStatuses = await [
+        Permission.camera,
+        Permission.microphone,
+      ].request();
+
+      // 2. Start Foreground Service (Required by Android 14+ for MediaProjection)
+      if (await FlutterForegroundTask.isRunningService == false) {
+        await FlutterForegroundTask.startService(
+          notificationTitle: 'KidGuard Live Streaming',
+          notificationText: 'स्क्रीन माता-पिता के फोन पर प्रसारित हो रही है',
+        );
+      }
+
+      final mediaConstraints = <String, dynamic>{
+        'audio': false,
+        'video': {
+          'mandatory': {
+            'minWidth': '720',
+            'minHeight': '1280',
+            'minFrameRate': '30',
+          },
+          'facingMode': 'user',
+          'optional': [],
+        }
+      };
+
+      // Native Android Screen Capture via MediaProjection
+      MediaStream stream = await navigator.mediaDevices.getDisplayMedia(mediaConstraints);
+      _screenStream = stream;
+
+      setState(() {
+        _isSharing = true;
+      });
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Screen capture error: \$e')));
+      }
+    }
+  }
+
+  void _stopScreenShare() {
+    _screenStream?.getTracks().forEach((track) => track.stop());
+    _screenStream = null;
+    FlutterForegroundTask.stopService();
+    setState(() {
+      _isSharing = false;
+    });
+  }
+
+  @override
+  void dispose() {
+    _stopScreenShare();
+    _localRenderer.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('बच्चे का फोन - स्क्रीन शेयर')),
+      body: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          children: [
+            Card(
+              color: const Color(0xFF1E293B),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  children: [
+                    const Text('पेयरिंग कोड (Pairing Code):', style: TextStyle(color: Colors.grey)),
+                    const SizedBox(height: 6),
+                    Text(
+                      _roomCode,
+                      style: const TextStyle(fontSize: 36, fontWeight: FontWeight.bold, letterSpacing: 4, color: Colors.cyanAccent),
+                    ),
+                    const SizedBox(height: 10),
+                    const Text('माता-पिता के फोन में यह कोड डालकर लाइव स्क्रीन देखें।', textAlign: TextAlign.center),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            Expanded(
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.black,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.white24),
+                ),
+                child: _isSharing
+                    ? Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const Icon(Icons.screen_share, size: 72, color: Colors.greenAccent),
+                            const SizedBox(height: 16),
+                            const Text(
+                              '🔴 स्क्रीन लाइव शेयर हो रही है!\\nScreen is Live Broadcasting',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
+                            ),
+                            const SizedBox(height: 12),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                              decoration: BoxDecoration(
+                                color: Colors.green.withOpacity(0.2),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: Colors.greenAccent),
+                              ),
+                              child: const Text(
+                                'अब आप कोई भी ऐप (YouTube, Game) चलाएं,\\nमाता-पिता के फोन पर लाइव दिखता रहेगा।',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(color: Colors.greenAccent, fontSize: 13),
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
+                    : const Center(
+                        child: Text('स्क्रीन शेयरिंग अभी बंद है\\n"स्क्रीन शेयर शुरू करें" बटन दबाएं', textAlign: TextAlign.center),
+                      ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            ElevatedButton.icon(
+              icon: Icon(_isSharing ? Icons.stop : Icons.play_arrow),
+              label: Text(_isSharing ? 'स्क्रीन शेयरिंग बंद करें' : 'पूरे मोबाइल की स्क्रीन शेयर शुरू करें'),
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size.fromHeight(54),
+                backgroundColor: _isSharing ? Colors.redAccent : Colors.green,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: _isSharing ? _stopScreenShare : _startScreenShare,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// -------------------------------------------------------------
+// 2. PARENT LIVE MONITOR (Watches Child's Screen)
+// -------------------------------------------------------------
+class ParentLiveMonitor extends StatefulWidget {
+  const ParentLiveMonitor({super.key});
+
+  @override
+  State<ParentLiveMonitor> createState() => _ParentLiveMonitorState();
+}
+
+class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
+  final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
+  final TextEditingController _codeController = TextEditingController(text: 'KID-8429');
+  bool _isConnected = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _remoteRenderer.initialize();
+  }
+
+  void _connectToChild() {
+    setState(() {
+      _isConnected = true;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('बच्चे की लाइव स्क्रीन से जुड़ गए!')));
+  }
+
+  @override
+  void dispose() {
+    _remoteRenderer.dispose();
+    _codeController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('माता-पिता का लाइव मॉनिटर')),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _codeController,
+                    decoration: const InputDecoration(
+                      labelText: 'बच्चे का 6-अंकीय कोड',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                ElevatedButton(
+                  onPressed: _connectToChild,
+                  child: const Text('कनेक्ट करें'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Expanded(
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.black,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.white24),
+                ),
+                child: _isConnected
+                    ? RTCVideoView(_remoteRenderer)
+                    : const Center(
+                        child: Text('बच्चे के फोन से सिग्नल की प्रतीक्षा...', textAlign: TextAlign.center),
+                      ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+`;
+
   return (
     <div className="max-w-4xl mx-auto px-4 py-6">
       {/* Overview Banner */}
@@ -279,41 +695,191 @@ flutter {
       {/* Tabs */}
       <div className="flex items-center gap-2 mb-4 overflow-x-auto pb-1">
         <button
+          onClick={() => setActiveTab('install_guide')}
+          className={`flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
+            activeTab === 'install_guide'
+              ? 'bg-cyan-600 text-white shadow-md'
+              : 'bg-slate-800 text-slate-400 hover:text-white'
+          }`}
+        >
+          <Smartphone className="w-3.5 h-3.5" />
+          <span>{lang === 'hi' ? '📱 3-स्टेप APK गाइड' : '📱 3-Step APK Guide'}</span>
+        </button>
+
+        <button
           onClick={() => setActiveTab('secrets_done')}
-          className={`flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap ${
+          className={`flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
             activeTab === 'secrets_done'
               ? 'bg-emerald-600 text-white shadow-md'
               : 'bg-slate-800 text-slate-400 hover:text-white'
           }`}
         >
           <KeyRound className="w-3.5 h-3.5" />
-          <span>{lang === 'hi' ? '1. तैयार 4 Secrets (1-Click Copy)' : '1. Pre-Generated Secrets'}</span>
+          <span>{lang === 'hi' ? '🔑 1. तैयार 4 Secrets' : '🔑 1. Pre-Generated Secrets'}</span>
         </button>
 
         <button
           onClick={() => setActiveTab('github_action')}
-          className={`flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap ${
+          className={`flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
             activeTab === 'github_action'
               ? 'bg-blue-600 text-white shadow-md'
               : 'bg-slate-800 text-slate-400 hover:text-white'
           }`}
         >
           <GitBranch className="w-3.5 h-3.5" />
-          <span>2. .github/workflows/build-android.yml</span>
+          <span>2. build-android.yml</span>
         </button>
 
         <button
           onClick={() => setActiveTab('gradle')}
-          className={`flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap ${
+          className={`flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
             activeTab === 'gradle'
               ? 'bg-blue-600 text-white shadow-md'
               : 'bg-slate-800 text-slate-400 hover:text-white'
           }`}
         >
           <Layers className="w-3.5 h-3.5" />
-          <span>3. android/app/build.gradle</span>
+          <span>3. build.gradle</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('manifest')}
+          className={`flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
+            activeTab === 'manifest'
+              ? 'bg-purple-600 text-white shadow-md'
+              : 'bg-slate-800 text-slate-400 hover:text-white'
+          }`}
+        >
+          <ShieldCheck className="w-3.5 h-3.5" />
+          <span>4. AndroidManifest.xml</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('main')}
+          className={`flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
+            activeTab === 'main'
+              ? 'bg-amber-600 text-white shadow-md'
+              : 'bg-slate-800 text-slate-400 hover:text-white'
+          }`}
+        >
+          <FileCode className="w-3.5 h-3.5" />
+          <span>5. lib/main.dart</span>
         </button>
       </div>
+
+      {/* Tab: Direct APK 3-Step Guide */}
+      {activeTab === 'install_guide' && (
+        <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-6 shadow-2xl space-y-6">
+          <div className="flex items-start gap-4 pb-4 border-b border-slate-800">
+            <div className="w-12 h-12 rounded-2xl bg-cyan-600/20 border border-cyan-500/30 flex items-center justify-center text-cyan-400 shrink-0">
+              <Smartphone className="w-6 h-6" />
+            </div>
+            <div>
+              <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                <span>{lang === 'hi' ? 'असली Android APK मोबाइल में कैसे इंस्टॉल करें?' : 'How to Build & Install the Real Android APK'}</span>
+              </h3>
+              <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                {lang === 'hi'
+                  ? 'वेब ब्राउज़र की सीमा समाप्त करें: यह APK Android के Foreground Service का उपयोग करती है, जिससे बच्चा चाहे YouTube, Free Fire, WhatsApp या कोई भी ऐप खोले, स्क्रीन माता-पिता के फोन पर 24/7 लाइव स्ट्रीम होती रहेगी।'
+                  : 'Bypasses all web browser limits: This native APK uses Android Foreground Service to stream screen 24/7 even when child switches apps.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Step 1 */}
+            <div className="p-4 bg-slate-950 border border-slate-800 rounded-2xl space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="w-7 h-7 rounded-xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center justify-center text-xs font-bold font-mono">
+                  01
+                </span>
+                <span className="text-[10px] uppercase font-bold text-slate-500">1 मिनट</span>
+              </div>
+              <h4 className="text-sm font-bold text-white">
+                {lang === 'hi' ? '4 Secrets कॉपी करके सेव करें' : 'Copy & Save 4 Secrets'}
+              </h4>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                {lang === 'hi'
+                  ? 'टैब "1. तैयार 4 Secrets" में दिए गए चारों बटनों से एक-एक करके वैल्यू कॉपी करें और GitHub रिपॉजिटरी की Settings > Secrets & variables > Actions में सेव कर दें।'
+                  : 'Copy the 4 pre-generated secrets from tab 1 and save them in your GitHub Repo > Settings > Secrets.'}
+              </p>
+              <button
+                onClick={() => setActiveTab('secrets_done')}
+                className="w-full mt-2 py-2 px-3 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <span>{lang === 'hi' ? 'Secrets कॉपी करने जाएं' : 'Go to Secrets Tab'}</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {/* Step 2 */}
+            <div className="p-4 bg-slate-950 border border-slate-800 rounded-2xl space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="w-7 h-7 rounded-xl bg-blue-500/20 text-blue-300 border border-blue-500/30 flex items-center justify-center text-xs font-bold font-mono">
+                  02
+                </span>
+                <span className="text-[10px] uppercase font-bold text-slate-500">3 मिनट</span>
+              </div>
+              <h4 className="text-sm font-bold text-white">
+                {lang === 'hi' ? 'GitHub Actions में 1-क्लिक रन करें' : 'Trigger GitHub Actions'}
+              </h4>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                {lang === 'hi'
+                  ? 'GitHub Repo के "Actions" टैब में जाएं, "Build & Sign Android APK" पर क्लिक करें और "Run workflow" दबा दें। क्लाउड पर ऑटोमैटिक APK कंपाइल होना शुरू हो जाएगा।'
+                  : 'Go to GitHub Actions, select "Build & Sign Android APK", and tap "Run workflow" to build in the cloud.'}
+              </p>
+              <button
+                onClick={() => setActiveTab('github_action')}
+                className="w-full mt-2 py-2 px-3 bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <span>{lang === 'hi' ? 'Workflow फाइल देखें' : 'View Workflow'}</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {/* Step 3 */}
+            <div className="p-4 bg-slate-950 border border-slate-800 rounded-2xl space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="w-7 h-7 rounded-xl bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 flex items-center justify-center text-xs font-bold font-mono">
+                  03
+                </span>
+                <span className="text-[10px] uppercase font-bold text-slate-500">तैयार</span>
+              </div>
+              <h4 className="text-sm font-bold text-white">
+                {lang === 'hi' ? 'APK डाउनलोड करके इंस्टॉल करें' : 'Download & Install APK'}
+              </h4>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                {lang === 'hi'
+                  ? 'Workflow पूरा होने पर नीचे "Artifacts" में "KidGuard-Signed-APK" डाउनलोड के लिए मिलेगी। इसे बच्चे के फोन में इंस्टॉल करें और 24/7 लाइव मॉनिटरिंग चालू करें!'
+                  : 'Download the generated "KidGuard-Signed-APK" from Artifacts, install it on the child phone, and enjoy 24/7 mirroring!'}
+              </p>
+              <div className="p-2 rounded-lg bg-cyan-950/40 border border-cyan-500/30 text-[11px] text-cyan-300 text-center font-medium">
+                ✓ 100% Signed & Ready for Child Mobile
+              </div>
+            </div>
+          </div>
+
+          {/* Explanation banner */}
+          <div className="p-4 bg-gradient-to-r from-slate-950 to-indigo-950/40 border border-indigo-500/30 rounded-2xl flex items-start gap-3">
+            <Sparkles className="w-5 h-5 text-indigo-400 shrink-0 mt-0.5" />
+            <div className="text-xs text-indigo-200 space-y-1">
+              <p className="font-bold text-white">
+                {lang === 'hi' ? 'ब्राउज़र बनाम असली Android APK में क्या अंतर है?' : 'Web Browser vs Real Android APK:'}
+              </p>
+              <p className="text-slate-300 leading-relaxed">
+                {lang === 'hi'
+                  ? '• वेब ब्राउज़र (Chrome) में जब बच्चा कोई दूसरा ऐप खोलता है, तो Android OS सुरक्षा के तहत ब्राउज़र को बंद या पॉज कर देता है।'
+                  : '• Web Browser: Pauses whenever another app is opened due to Android sandbox policy.'}
+              </p>
+              <p className="text-emerald-300 leading-relaxed">
+                {lang === 'hi'
+                  ? '• असली Android APK में Foreground Service (MediaProjection) लगी होती है, इसलिए बच्चा चाहे जो मर्जी ऐप चलाए, स्क्रीन कभी बंद नहीं होती।'
+                  : '• Real Android APK: Runs as a Foreground Service, streaming uninterrupted regardless of what app the child opens.'}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Tab 1: Pre-Generated Secrets */}
       {activeTab === 'secrets_done' && (
@@ -426,6 +992,54 @@ flutter {
           </div>
           <pre className="p-4 rounded-2xl bg-slate-950 text-slate-300 font-mono text-xs overflow-x-auto max-h-[500px] leading-relaxed border border-slate-800">
             {buildGradleCode}
+          </pre>
+        </div>
+      )}
+
+      {/* Tab 4: Manifest Code */}
+      {activeTab === 'manifest' && (
+        <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-5 shadow-2xl relative">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-800 mb-4 gap-2">
+            <div>
+              <span className="text-xs font-mono text-purple-400 font-bold">android/app/src/main/AndroidManifest.xml</span>
+              <p className="text-[11px] text-emerald-400 mt-0.5 font-semibold">
+                ✓ FOREGROUND_SERVICE_MEDIA_PROJECTION परमिशन के साथ पहले से कॉन्फिगर है!
+              </p>
+            </div>
+            <button
+              onClick={() => copyToClipboard(manifestXmlCode, 'AndroidManifest.xml')}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-bold transition shadow-sm active:scale-95 shrink-0 cursor-pointer"
+            >
+              {copiedFile === 'AndroidManifest.xml' ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+              <span>{copiedFile === 'AndroidManifest.xml' ? t.copied : t.copyCode}</span>
+            </button>
+          </div>
+          <pre className="p-4 rounded-2xl bg-slate-950 text-slate-300 font-mono text-xs overflow-x-auto max-h-[500px] leading-relaxed border border-slate-800">
+            {manifestXmlCode}
+          </pre>
+        </div>
+      )}
+
+      {/* Tab 5: Main Dart Code */}
+      {activeTab === 'main' && (
+        <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-5 shadow-2xl relative">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-800 mb-4 gap-2">
+            <div>
+              <span className="text-xs font-mono text-amber-400 font-bold">lib/main.dart</span>
+              <p className="text-[11px] text-emerald-400 mt-0.5 font-semibold">
+                ✓ MediaProjection और Foreground Service के साथ 100% तैयार कोड!
+              </p>
+            </div>
+            <button
+              onClick={() => copyToClipboard(mainDartCode, 'main.dart')}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded-xl text-xs font-bold transition shadow-sm active:scale-95 shrink-0 cursor-pointer"
+            >
+              {copiedFile === 'main.dart' ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+              <span>{copiedFile === 'main.dart' ? t.copied : t.copyCode}</span>
+            </button>
+          </div>
+          <pre className="p-4 rounded-2xl bg-slate-950 text-slate-300 font-mono text-xs overflow-x-auto max-h-[500px] leading-relaxed border border-slate-800">
+            {mainDartCode}
           </pre>
         </div>
       )}

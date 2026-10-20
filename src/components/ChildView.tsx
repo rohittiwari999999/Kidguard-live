@@ -24,7 +24,6 @@ import {
   AlertCircle,
   KeyRound
 } from 'lucide-react';
-import { SimulatedChildScreen } from './SimulatedChildScreen';
 import { QRCodeDisplay } from './QRCodeDisplay';
 import { PeerManager } from '../services/peerManager';
 import { sounds } from '../utils/sound';
@@ -50,13 +49,14 @@ export const ChildView: React.FC<ChildViewProps> = ({
 }) => {
   const t = translations[lang];
 
-  const [streamSource, setStreamSource] = useState<'simulation' | 'real_screen' | 'camera'>('real_screen');
+  const [streamSource, setStreamSource] = useState<'real_screen' | 'camera'>('real_screen');
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamInterrupted, setStreamInterrupted] = useState(false);
   const [bannerError, setBannerError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string>('');
   const [showQrModal, setShowQrModal] = useState(false);
+  const [showAndroidGuidanceModal, setShowAndroidGuidanceModal] = useState(false);
   const [broadcastSeconds, setBroadcastSeconds] = useState(0);
 
   // Permission states for Camera, Microphone, and Screen Sharing
@@ -262,19 +262,6 @@ export const ChildView: React.FC<ChildViewProps> = ({
     return () => clearInterval(interval);
   }, [isStreaming, roomCode]);
 
-  // Handle stream from simulation
-  const handleSimulationStream = (stream: MediaStream) => {
-    activeStreamRef.current = stream;
-    if (videoPreviewRef.current) {
-      videoPreviewRef.current.srcObject = stream;
-      videoPreviewRef.current.muted = true;
-      videoPreviewRef.current.play().catch(() => {});
-    }
-    if (streamSource === 'simulation') {
-      broadcastStreamToParent(stream);
-    }
-  };
-
   // Start Real Screen Capture (Safe for mobile Android Chrome and Desktop)
   const startRealScreenCapture = async () => {
     setBannerError(null);
@@ -284,25 +271,42 @@ export const ChildView: React.FC<ChildViewProps> = ({
       if (!navigator.mediaDevices?.getDisplayMedia) {
         setBannerError(
           lang === 'hi'
-            ? 'आपके ब्राउज़र में getDisplayMedia स्क्रीन शेयरिंग समर्थित नहीं है। कृपया सिमुलेशन मोड या कैमरा मोड चुनें।'
-            : 'DisplayMedia screen sharing is not supported in this browser. Please use Simulation or Camera mode.'
+            ? 'आपके ब्राउज़र में getDisplayMedia स्क्रीन शेयरिंग समर्थित नहीं है। कृपया कैमरा मोड या ऊपर असली Android APK चुनें।'
+            : 'DisplayMedia screen sharing is not supported in this browser. Please use Camera mode or the Real Android APK tab.'
         );
         return;
       }
 
+      const isMobile = typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod|webOS/i.test(navigator.userAgent);
       let screenStream: MediaStream | null = null;
+
       try {
-        // Safe cross-platform parameters: audio must be false on Android mobile!
-        screenStream = await navigator.mediaDevices.getDisplayMedia({
-          video: {
-            frameRate: { ideal: 15, max: 24 },
-            width: { ideal: 1280, max: 1280 },
-            height: { ideal: 720, max: 720 },
-          } as any,
-          audio: false, // CRITICAL: Setting audio: true crashes Android Chrome media pipe
-        });
+        if (isMobile) {
+          // On mobile Android, strictly pass video: true and audio: false.
+          // Sub-constraints crash Chrome on Android!
+          screenStream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: false,
+          });
+        } else {
+          try {
+            screenStream = await navigator.mediaDevices.getDisplayMedia({
+              video: {
+                frameRate: { ideal: 15, max: 24 },
+                width: { ideal: 1280, max: 1280 },
+                height: { ideal: 720, max: 720 },
+              } as any,
+              audio: false,
+            });
+          } catch {
+            screenStream = await navigator.mediaDevices.getDisplayMedia({
+              video: true,
+              audio: false,
+            });
+          }
+        }
       } catch (err1: any) {
-        console.warn('Advanced displayMedia failed, trying simple fallback:', err1);
+        console.warn('Advanced displayMedia failed, trying direct fallback:', err1);
         screenStream = await navigator.mediaDevices.getDisplayMedia({
           video: true,
           audio: false,
@@ -314,6 +318,7 @@ export const ChildView: React.FC<ChildViewProps> = ({
       }
 
       activeStreamRef.current = screenStream;
+      setScreenPerm('granted');
       // Do NOT attach screenStream to local videoPreviewRef!
       // Attaching the screen capture to a video element on that same screen creates
       // an infinite feedback loop that causes Android Chrome to crash or run out of GPU memory!
@@ -337,8 +342,8 @@ export const ChildView: React.FC<ChildViewProps> = ({
       if (err.name !== 'NotAllowedError') {
         setBannerError(
           lang === 'hi'
-            ? `स्क्रीन शेयरिंग शुरू नहीं हो सकी: ${err.message || 'त्रुटि'}। कृपया दोबारा कोशिश करें या सिमुलेशन मोड चुनें।`
-            : `Could not start screen share: ${err.message || 'Error'}. Please try again or use Simulation mode.`
+            ? `स्क्रीन शेयरिंग शुरू नहीं हो सकी: ${err.message || 'त्रुटि'}। कृपया दोबारा कोशिश करें या ऊपर '📱 असली Android APK' टैब देखें।`
+            : `Could not start screen share: ${err.message || 'Error'}. Please try again or use the Real Android APK tab.`
         );
       }
     }
@@ -375,21 +380,19 @@ export const ChildView: React.FC<ChildViewProps> = ({
     }
   };
 
-  // Start Sharing
-  const handleStartShare = () => {
+  // Start Sharing (prompts guidance modal if real_screen on mobile)
+  const handleStartShare = (bypassGuidance: boolean | React.MouseEvent = false) => {
+    const shouldBypass = typeof bypassGuidance === 'boolean' ? bypassGuidance : false;
     setBannerError(null);
     setStreamInterrupted(false);
     if (streamSource === 'real_screen') {
-      startRealScreenCapture();
-    } else if (streamSource === 'camera') {
-      startCameraCapture();
-    } else {
-      // Simulation mode
-      setIsStreaming(true);
-      if (activeStreamRef.current) {
-        broadcastStreamToParent(activeStreamRef.current);
+      if (!shouldBypass) {
+        setShowAndroidGuidanceModal(true);
+        return;
       }
-      sounds.playChime();
+      startRealScreenCapture();
+    } else {
+      startCameraCapture();
     }
   };
 
@@ -403,8 +406,9 @@ export const ChildView: React.FC<ChildViewProps> = ({
   };
 
   const stopStreaming = () => {
-    if (activeStreamRef.current && streamSource !== 'simulation') {
+    if (activeStreamRef.current) {
       activeStreamRef.current.getTracks().forEach((t) => t.stop());
+      activeStreamRef.current = null;
     }
     setIsStreaming(false);
     onStreamActive(false, null);
@@ -434,36 +438,40 @@ export const ChildView: React.FC<ChildViewProps> = ({
     <div className="max-w-2xl mx-auto px-4 py-6">
       {/* Interrupted stream alert (e.g. app switch in mobile Android) */}
       {streamInterrupted && (
-        <div className="mb-6 p-4 rounded-2xl bg-amber-500/15 border-2 border-amber-500/40 text-amber-200 shadow-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+        <div className="mb-6 p-5 rounded-2xl bg-amber-500/15 border-2 border-amber-500/40 text-amber-200 shadow-xl space-y-3">
           <div className="flex items-start gap-3">
-            <div className="p-2 bg-amber-500 text-slate-950 rounded-xl shrink-0 mt-0.5">
+            <div className="p-2.5 bg-amber-500 text-slate-950 rounded-xl shrink-0 mt-0.5">
               <AlertTriangle className="w-5 h-5" />
             </div>
             <div>
               <h4 className="text-sm font-bold text-white">
-                {lang === 'hi' ? 'स्क्रीन शेयरिंग रुक गई (या दूसरा ऐप खुला)' : 'Screen sharing paused (App switched)'}
-              </h4>
-              <p className="text-xs text-amber-200/90 mt-1 max-w-md leading-relaxed">
                 {lang === 'hi'
-                  ? 'Android फोन में जब आप कोई दूसरा ऐप खोलते हैं, तो मोबाइल Chrome बैकग्राउंड में स्क्रीन शेयरिंग रोक देता है। दोबारा शुरू करने के लिए यहाँ दबाएं।'
-                  : 'On Android mobile, opening another app pauses the browser screen stream. Tap below to resume.'}
+                  ? '⚠️ स्क्रीन शेयरिंग रुक गई है (ऐप स्विच होने के कारण)'
+                  : '⚠️ Screen sharing paused (App switched or minimized)'}
+              </h4>
+              <p className="text-xs text-amber-200/90 mt-1 max-w-xl leading-relaxed">
+                {lang === 'hi'
+                  ? 'Android OS की सुरक्षा नीति: जब आप ब्राउज़र छोड़कर दूसरा ऐप (जैसे YouTube, WhatsApp आदि) खोलते हैं या वापस आते हैं, तो Android वेब ब्राउज़र की स्क्रीन रिकॉर्डिंग रोक देता है। यह कोई बग नहीं है, बल्कि Android का सिस्टम सुरक्षा नियम है।'
+                  : 'Android Security Policy: When switching to another app or minimizing Chrome, the OS automatically terminates browser screen recording.'}
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2 w-full sm:w-auto">
+
+          <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-amber-500/20">
             <button
-              onClick={handleStartShare}
-              className="flex-1 sm:flex-initial px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl transition flex items-center justify-center gap-1.5 shadow-md active:scale-95"
+              onClick={() => handleStartShare(true)}
+              className="px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl transition flex items-center justify-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
             >
               <RefreshCw className="w-3.5 h-3.5" />
-              <span>{lang === 'hi' ? 'दोबारा शुरू करें' : 'Resume Sharing'}</span>
+              <span>{lang === 'hi' ? '🔄 स्क्रीन शेयरिंग दोबारा शुरू करें' : '🔄 Resume Screen Share'}</span>
             </button>
             {onSelectRole && (
               <button
                 onClick={() => onSelectRole('flutter-guide')}
-                className="flex-1 sm:flex-initial px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-xl transition border border-slate-700"
+                className="px-4 py-2.5 bg-gradient-to-r from-cyan-600 to-teal-600 hover:from-cyan-500 hover:to-teal-500 text-white text-xs font-bold rounded-xl transition shadow-md flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
               >
-                {lang === 'hi' ? 'Flutter APK देखें' : 'View Flutter APK'}
+                <Smartphone className="w-3.5 h-3.5" />
+                <span>{lang === 'hi' ? '📱 24x7 बैकग्राउंड के लिए असली APK डाउनलोड करें' : '📱 Get Real APK (24/7 Background)'}</span>
               </button>
             )}
           </div>
@@ -717,33 +725,13 @@ export const ChildView: React.FC<ChildViewProps> = ({
           <label className="block text-xs font-medium text-slate-300 mb-2">
             {t.selectMode}
           </label>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-            <button
-              onClick={() => {
-                if (isStreaming) stopStreaming();
-                setStreamSource('simulation');
-              }}
-              className={`p-3 rounded-xl border text-left transition flex items-start gap-3 ${
-                streamSource === 'simulation'
-                  ? 'bg-blue-600/20 border-blue-500/50 text-white shadow-md'
-                  : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:bg-slate-800/50'
-              }`}
-            >
-              <Layers className="w-5 h-5 text-blue-400 shrink-0 mt-0.5" />
-              <div>
-                <p className="text-xs font-bold text-white">{t.modeSimulation}</p>
-                <p className="text-[10px] text-slate-400 mt-0.5 leading-tight">
-                  {lang === 'hi' ? 'YouTube/Game डेमो (100% सभी फोन पर काम करता है)' : 'Interactive apps simulation (Works on all browsers)'}
-                </p>
-              </div>
-            </button>
-
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <button
               onClick={() => {
                 if (isStreaming) stopStreaming();
                 setStreamSource('real_screen');
               }}
-              className={`p-3 rounded-xl border text-left transition flex items-start gap-3 ${
+              className={`p-3.5 rounded-xl border text-left transition flex items-start gap-3 cursor-pointer ${
                 streamSource === 'real_screen'
                   ? 'bg-blue-600/20 border-blue-500/50 text-white shadow-md'
                   : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:bg-slate-800/50'
@@ -753,7 +741,7 @@ export const ChildView: React.FC<ChildViewProps> = ({
               <div>
                 <p className="text-xs font-bold text-white">{t.modeRealScreen}</p>
                 <p className="text-[10px] text-slate-400 mt-0.5 leading-tight">
-                  {lang === 'hi' ? 'पूरे फोन की स्क्रीन शेयर (Chrome/DisplayMedia)' : 'Real phone screen via DisplayMedia'}
+                  {lang === 'hi' ? 'बच्चे के पूरे फोन की स्क्रीन शेयर (Real Screen Broadcast)' : 'Real phone screen via DisplayMedia'}
                 </p>
               </div>
             </button>
@@ -763,7 +751,7 @@ export const ChildView: React.FC<ChildViewProps> = ({
                 if (isStreaming) stopStreaming();
                 setStreamSource('camera');
               }}
-              className={`p-3 rounded-xl border text-left transition flex items-start gap-3 ${
+              className={`p-3.5 rounded-xl border text-left transition flex items-start gap-3 cursor-pointer ${
                 streamSource === 'camera'
                   ? 'bg-blue-600/20 border-blue-500/50 text-white shadow-md'
                   : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:bg-slate-800/50'
@@ -773,7 +761,7 @@ export const ChildView: React.FC<ChildViewProps> = ({
               <div>
                 <p className="text-xs font-bold text-white">{t.modeCamera}</p>
                 <p className="text-[10px] text-slate-400 mt-0.5 leading-tight">
-                  {lang === 'hi' ? 'बच्चे का फ्रंट/बैक कैमरा' : 'Front/Back camera stream'}
+                  {lang === 'hi' ? 'बच्चे का लाइव फ्रंट/बैक कैमरा (Live Video Feed)' : 'Front/Back camera live stream'}
                 </p>
               </div>
             </button>
@@ -825,16 +813,9 @@ export const ChildView: React.FC<ChildViewProps> = ({
           </div>
         </div>
 
-        {/* Live Stream View or Interactive Simulation */}
+        {/* Live Stream View */}
         <div className="mb-6">
-          {streamSource === 'simulation' ? (
-            <div className="p-4 bg-slate-950/70 border border-slate-800/80 rounded-2xl">
-              <SimulatedChildScreen
-                onStreamReady={handleSimulationStream}
-                isStreaming={isStreaming}
-              />
-            </div>
-          ) : streamSource === 'real_screen' && isStreaming ? (
+          {streamSource === 'real_screen' && isStreaming ? (
             /* Crash-Proof Broadcasting Active Card for Mobile */
             <div className="p-6 bg-gradient-to-br from-slate-900 via-indigo-950/40 to-slate-950 border-2 border-emerald-500/50 rounded-2xl shadow-2xl text-center space-y-4 relative overflow-hidden">
               <div className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-mono font-bold animate-pulse">
@@ -1054,6 +1035,94 @@ export const ChildView: React.FC<ChildViewProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Android Screen Sharing Guidance Modal */}
+      {showAndroidGuidanceModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700/80 rounded-3xl p-6 max-w-lg w-full shadow-2xl space-y-4">
+            <div className="flex items-center gap-3 pb-3 border-b border-slate-800">
+              <div className="w-12 h-12 rounded-2xl bg-blue-500/20 border border-blue-500/30 flex items-center justify-center text-blue-400 shrink-0">
+                <Smartphone className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">
+                  {lang === 'hi' ? 'Android स्क्रीन शेयरिंग: जरूरी जानकारी' : 'Android Screen Sharing Guide'}
+                </h3>
+                <p className="text-xs text-blue-300">
+                  {lang === 'hi' ? 'स्क्रीन शेयर शुरू करने से पहले कृपया इसे समझें' : 'Please review this quick device note'}
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-3 text-xs text-slate-300">
+              {/* Entire screen explanation */}
+              <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800/80 space-y-1">
+                <p className="font-bold text-white flex items-center gap-1.5">
+                  <span className="w-5 h-5 rounded-full bg-blue-600/30 text-blue-400 flex items-center justify-center text-[11px] font-bold">1</span>
+                  <span>{lang === 'hi' ? '"Entire screen" चुनने पर:' : 'When selecting "Entire screen":'}</span>
+                </p>
+                <p className="text-slate-400 pl-6.5 leading-relaxed">
+                  {lang === 'hi'
+                    ? 'Android का "Start now" दबाने पर Chrome अपने आप बैकग्राउंड में चला जाएगा और होम स्क्रीन दिखेगी। ऐप बंद या क्रैश नहीं हुआ है, बल्कि स्क्रीन शेयरिंग चालू हो गई है!'
+                    : 'Android will minimize Chrome to show your home screen. The app has NOT crashed; live broadcasting is active!'}
+                </p>
+              </div>
+
+              {/* Single app explanation */}
+              <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800/80 space-y-1">
+                <p className="font-bold text-white flex items-center gap-1.5">
+                  <span className="w-5 h-5 rounded-full bg-indigo-600/30 text-indigo-400 flex items-center justify-center text-[11px] font-bold">2</span>
+                  <span>{lang === 'hi' ? '"Single app" चुनने पर:' : 'When selecting "Single app":'}</span>
+                </p>
+                <p className="text-slate-400 pl-6.5 leading-relaxed">
+                  {lang === 'hi'
+                    ? 'Android खुद उस ऐप को खोल देगा। लेकिन जब आप वापस ब्राउज़र में आएंगे, तो Android सुरक्षा के कारण वेब स्क्रीन रिकॉर्डिंग बंद हो जाती है, इसलिए आपको "दोबारा शुरू करें" दबाना होगा।'
+                    : 'Android launches the selected app. When you return to the browser, the OS terminates the stream by security policy.'}
+                </p>
+              </div>
+
+              {/* Background 24/7 APK */}
+              <div className="p-3 rounded-xl bg-cyan-950/40 border border-cyan-500/30 space-y-1 text-cyan-200">
+                <p className="font-bold text-white flex items-center gap-1.5">
+                  <Sparkles className="w-4 h-4 text-cyan-400" />
+                  <span>{lang === 'hi' ? '24/7 बिना रुके बैकग्राउंड मॉनिटरिंग:' : '24/7 Background Monitoring:'}</span>
+                </p>
+                <p className="text-cyan-200/90 pl-6 leading-relaxed">
+                  {lang === 'hi'
+                    ? 'यदि आप चाहते हैं कि बच्चा कोई भी गेम या यूट्यूब चलाए और स्क्रीन कभी न रुके, तो हमारी असली Android APK का उपयोग करें (Foreground Service सपोर्ट)।'
+                    : 'To watch while child plays games or YouTube without pausing, install the real Android APK.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="pt-2 flex flex-col sm:flex-row items-center gap-2">
+              <button
+                onClick={() => {
+                  setShowAndroidGuidanceModal(false);
+                  startRealScreenCapture();
+                }}
+                className="w-full sm:flex-1 py-3 px-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white rounded-xl text-xs font-bold transition shadow-lg flex items-center justify-center gap-2 cursor-pointer active:scale-95"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>{lang === 'hi' ? 'समझ गया, स्क्रीन शेयर शुरू करें' : 'Got it, Start Screen Share'}</span>
+              </button>
+
+              {onSelectRole && (
+                <button
+                  onClick={() => {
+                    setShowAndroidGuidanceModal(false);
+                    onSelectRole('flutter-guide');
+                  }}
+                  className="w-full sm:w-auto py-3 px-4 bg-slate-800 hover:bg-slate-700 text-cyan-300 rounded-xl text-xs font-semibold transition border border-slate-700 flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Smartphone className="w-3.5 h-3.5" />
+                  <span>{lang === 'hi' ? 'असली Android APK देखें' : 'View Android APK'}</span>
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}

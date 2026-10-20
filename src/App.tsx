@@ -2,7 +2,6 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Navbar } from './components/Navbar';
 import { ChildView } from './components/ChildView';
 import { ParentView } from './components/ParentView';
-import { SplitDemoView } from './components/SplitDemoView';
 import { FlutterGuideView } from './components/FlutterGuideView';
 import { PeerManager } from './services/peerManager';
 import { DeviceRole, Language } from './types';
@@ -21,11 +20,11 @@ export default function App() {
   const [currentRole, setCurrentRole] = useState<DeviceRole>(() => {
     try {
       const urlRole = new URLSearchParams(window.location.search).get('role') as DeviceRole;
-      if (urlRole && ['parent', 'child', 'split-demo', 'flutter-guide'].includes(urlRole)) {
+      if (urlRole && ['parent', 'child', 'flutter-guide'].includes(urlRole)) {
         return urlRole;
       }
       const saved = localStorage.getItem('kidguard_active_role') as DeviceRole;
-      if (saved && ['parent', 'child', 'split-demo', 'flutter-guide'].includes(saved)) {
+      if (saved && ['parent', 'child', 'flutter-guide'].includes(saved)) {
         return saved;
       }
     } catch {
@@ -111,14 +110,6 @@ export default function App() {
             peerManager={peerManager}
             defaultRoomCode={roomCode}
             activeLocalStream={activeStream}
-          />
-        )}
-
-        {currentRole === 'split-demo' && (
-          <SplitDemoView
-            lang={lang}
-            peerManager={peerManager}
-            roomCode={roomCode}
           />
         )}
 
