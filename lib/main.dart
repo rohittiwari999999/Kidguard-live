@@ -955,18 +955,30 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     });
 
     try {
-      // 1. Fetch Kid's Offer from Signaling Server
-      final offerData = await _signaling.getOffer(roomCode);
+      // 1. Fetch Kid's Offer from Signaling Server (with 10 retries / 15s timeout)
+      Map<String, dynamic>? offerData;
+      for (int attempt = 1; attempt <= 10; attempt++) {
+        if (!mounted || !_isConnecting) return;
+        setState(() {
+          _statusText = 'बच्चे के फोन से सिग्नल खोज रहे हैं... (प्रयास $attempt/10)';
+        });
+        offerData = await _signaling.getOffer(roomCode);
+        if (offerData != null && offerData['sdp'] != null) {
+          break;
+        }
+        await Future.delayed(const Duration(milliseconds: 1500));
+      }
+
       if (offerData == null || offerData['sdp'] == null) {
         setState(() {
           _isConnecting = false;
-          _statusText = '⚠️ बच्चे के फोन से कोई एक्टिव स्क्रीन शेयर नहीं मिला।\nपहले बच्चे के फोन में "स्क्रीन शेयर शुरू करें" दबाएं।';
+          _statusText = '⚠️ कोड $roomCode पर कोई एक्टिव स्क्रीन शेयर नहीं मिला।\nजांचें कि बच्चे के फोन में वही कोड ($roomCode) है और स्क्रीन शेयर चालू है।';
         });
         return;
       }
 
       setState(() {
-        _statusText = 'PeerConnection तैयार हो रहा है...';
+        _statusText = 'सिग्नल मिल गया! कनेक्शन बन रहा है...';
       });
 
       // 2. Create PeerConnection

@@ -1162,7 +1162,15 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     setState(() { _isConnecting = true; _statusText = 'ऑफर खोज रहे हैं...'; });
 
     try {
-      final offerData = await _signaling.getOffer(roomCode);
+      Map<String, dynamic>? offerData;
+      for (int i = 1; i <= 10; i++) {
+        if (!mounted || !_isConnecting) return;
+        setState(() { _statusText = 'बच्चे के फोन से सिग्नल खोज रहे हैं... (प्रयास \$i/10)'; });
+        offerData = await _signaling.getOffer(roomCode);
+        if (offerData != null && offerData['sdp'] != null) break;
+        await Future.delayed(const Duration(milliseconds: 1500));
+      }
+
       if (offerData == null || offerData['sdp'] == null) {
         setState(() { _isConnecting = false; _statusText = '⚠️ बच्चे का लाइव स्क्रीन शेयर नहीं मिला।'; });
         return;
