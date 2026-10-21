@@ -238,8 +238,9 @@ flutter {
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
-    <!-- Android 13+ & Android 14+ MediaProjection Foreground Service Permissions -->
+    <!-- Android 13+ & Android 14/15/16 Foreground Service Permissions -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -264,11 +265,17 @@ flutter {
             </intent-filter>
         </activity>
 
-        <!-- Foreground Service for Background Screen Capture (Child uses other apps without pausing!) -->
+        <!-- General Watchdog Foreground Service (dataSync type so it starts safely before MediaProjection prompt) -->
         <service
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
-            android:foregroundServiceType="mediaProjection"
+            android:foregroundServiceType="dataSync"
             android:stopWithTask="true" />
+
+        <!-- Native Android MediaProjection Screen Capture Service (Started strictly AFTER user grants MediaProjection) -->
+        <service
+            android:name=".ScreenCaptureService"
+            android:foregroundServiceType="mediaProjection"
+            android:exported="false" />
 
         <meta-data
             android:name="flutterEmbedding"
@@ -580,17 +587,17 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       await Permission.notification.request();
       await [Permission.camera, Permission.microphone].request();
 
-      if (await FlutterForegroundTask.isRunningService == false) {
-        await FlutterForegroundTask.startService(
-          notificationTitle: 'KidGuard Live Streaming',
-          notificationText: 'स्क्रीन माता-पिता के फोन पर प्रसारित हो रही है',
-          callback: startCallback,
-        );
-      }
-
       try {
-        await _platformChannel.invokeMethod('startScreenCapture');
-      } catch (_) {}
+        if (await FlutterForegroundTask.isRunningService == false) {
+          await FlutterForegroundTask.startService(
+            notificationTitle: 'KidGuard Live Streaming',
+            notificationText: 'स्क्रीन माता-पिता के फोन पर प्रसारित हो रही है',
+            callback: startCallback,
+          );
+        }
+      } catch (fgsError) {
+        debugPrint('Foreground task: \$fgsError');
+      }
 
       // 1. Pehle createPeerConnection() call karo
       _peerConnection = await createPeerConnection(_iceServers);
@@ -609,9 +616,13 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         }
       };
 
-      // 2. Fir getDisplayMedia() se screen stream lo
+      // 2. Fir getDisplayMedia() se screen stream lo (Clean single call)
       MediaStream stream = await navigator.mediaDevices.getDisplayMedia({'audio': false, 'video': true});
       _screenStream = stream;
+
+      try {
+        await _platformChannel.invokeMethod('startScreenCapture');
+      } catch (_) {}
 
       stream.getVideoTracks().forEach((track) {
         track.onEnded = () {

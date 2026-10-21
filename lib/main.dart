@@ -336,23 +336,22 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         _statusMessage = 'अनुमतियां जांच रहे हैं...';
       });
 
-      // 1. Notification Permission (Android 13/14/15/16)
+      // 1. Android 13/14/15/16: Notification & Core Permissions
       await Permission.notification.request();
       await [Permission.camera, Permission.microphone].request();
 
-      // Start Foreground Service so Android doesn't kill capture
-      if (await FlutterForegroundTask.isRunningService == false) {
-        await FlutterForegroundTask.startService(
-          notificationTitle: 'KidGuard Live Streaming',
-          notificationText: 'स्क्रीन माता-पिता के फोन पर प्रसारित हो रही है',
-          callback: startCallback,
-        );
-      }
-
-      // Try Android 14+ Native Foreground MediaProjection service
+      // 2. Start Foreground Watchdog Service safely (dataSync type prevents Android 14/15/16 crash)
       try {
-        await _platformChannel.invokeMethod('startScreenCapture');
-      } catch (_) {}
+        if (await FlutterForegroundTask.isRunningService == false) {
+          await FlutterForegroundTask.startService(
+            notificationTitle: 'KidGuard Live Streaming',
+            notificationText: 'स्क्रीन माता-पिता के फोन पर प्रसारित हो रही है',
+            callback: startCallback,
+          );
+        }
+      } catch (fgsError) {
+        debugPrint('FlutterForegroundTask notice: $fgsError');
+      }
 
       setState(() {
         _statusMessage = '1/4: WebRTC Peer Connection तैयार हो रहा है...';
@@ -399,7 +398,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         _statusMessage = '2/4: स्क्रीन कैप्चर अनुमति मांग रहे हैं...';
       });
 
-      // STEP 2: Fir getDisplayMedia() se screen stream lo
+      // STEP 2: Fir getDisplayMedia() se screen stream lo (Clean single call)
       final mediaConstraints = <String, dynamic>{
         'audio': false,
         'video': true,
@@ -407,6 +406,11 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
 
       MediaStream stream = await navigator.mediaDevices.getDisplayMedia(mediaConstraints);
       _screenStream = stream;
+
+      // Start native helper notification so Android 14/15/16 keeps streaming active when minimized
+      try {
+        await _platformChannel.invokeMethod('startScreenCapture');
+      } catch (_) {}
 
       stream.getVideoTracks().forEach((track) {
         track.onEnded = () {
