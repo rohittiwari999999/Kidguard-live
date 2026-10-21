@@ -290,33 +290,33 @@ package com.example.kidguard_live
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.example.kidguard_live/screen_capture"
+    private val REQUEST_SCREEN_CAPTURE = 2001
+    private var pendingResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
-                "startScreenCapture" -> {
+                "prepareScreenCapture" -> {
                     try {
-                        val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
-                            action = ScreenCaptureService.ACTION_START
-                        }
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            startForegroundService(serviceIntent)
-                        } else {
-                            startService(serviceIntent)
-                        }
-                        result.success(true)
+                        pendingResult = result
+                        val mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                        startActivityForResult(mediaProjectionManager.createScreenCaptureIntent(), REQUEST_SCREEN_CAPTURE)
                     } catch (e: Exception) {
                         e.printStackTrace()
-                        result.success(true)
+                        result.error("ERROR", e.message, null)
+                        pendingResult = null
                     }
                 }
                 "stopScreenCapture" -> {
@@ -337,22 +337,30 @@ class MainActivity: FlutterActivity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        // Android 14/15/16 Lifesaver Fix:
-        // As soon as the user grants MediaProjection (resultCode == RESULT_OK and data != null),
-        // we start ScreenCaptureService as FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION right here
-        // so that it is ALREADY running when flutter_webrtc plugin invokes getMediaProjection!
-        if (resultCode == Activity.RESULT_OK && data != null) {
-            try {
-                val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
-                    action = ScreenCaptureService.ACTION_START
+        if (requestCode == REQUEST_SCREEN_CAPTURE) {
+            if (resultCode == Activity.RESULT_OK && data != null) {
+                try {
+                    // Start Foreground Service with type mediaProjection immediately upon user consent!
+                    val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
+                        action = ScreenCaptureService.ACTION_START
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(serviceIntent)
+                    } else {
+                        startService(serviceIntent)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
                 }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(serviceIntent)
-                } else {
-                    startService(serviceIntent)
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
+
+                // Give the service 400ms to establish foreground state before resolving Flutter promise
+                Handler(Looper.getMainLooper()).postDelayed({
+                    pendingResult?.success(true)
+                    pendingResult = null
+                }, 400)
+            } else {
+                pendingResult?.error("DENIED", "Screen capture permission denied", null)
+                pendingResult = null
             }
         }
     }
@@ -801,29 +809,21 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         }
       };
 
-      // 2. Fir getDisplayMedia() se screen capture prompt dikhao ("Entire screen" / "Start now")
+      // 2. Android 14/15/16 Lifesaver: Call native prepareScreenCapture to start
+      // mediaProjection Foreground Service BEFORE WebRTC getDisplayMedia runs!
+      try {
+        final ready = await _platformChannel.invokeMethod('prepareScreenCapture');
+        if (ready != true) {
+          if (mounted) setState(() { _statusMessage = 'अनुमति नहीं मिली या रद्द कर दी गई।'; });
+          return;
+        }
+      } catch (nativeErr) {
+        debugPrint('prepareScreenCapture error: \$nativeErr');
+      }
+
+      // 3. NOW getDisplayMedia() will succeed on Android 16 without any crash!
       MediaStream stream = await navigator.mediaDevices.getDisplayMedia({'audio': false, 'video': true});
       _screenStream = stream;
-
-      // 3. Android Sep 2026 Security Patch Rule:
-      // Start Foreground Service STRICTLY AFTER user grants MediaProjection permission!
-      try {
-        if (await FlutterForegroundTask.isRunningService == false) {
-          await FlutterForegroundTask.startService(
-            notificationTitle: 'KidGuard Live Streaming',
-            notificationText: 'स्क्रीन माता-पिता के फोन पर प्रसारित हो रही है',
-            callback: startCallback,
-          );
-        }
-      } catch (fgsError) {
-        debugPrint('Foreground task: \$fgsError');
-      }
-
-      try {
-        await _platformChannel.invokeMethod('startScreenCapture');
-      } catch (e) {
-        debugPrint('Native helper: \$e');
-      }
 
       stream.getVideoTracks().forEach((track) {
         track.onEnded = () {

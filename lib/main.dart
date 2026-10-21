@@ -389,8 +389,24 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         _statusMessage = '2/4: स्क्रीन कैप्चर अनुमति मांग रहे हैं...';
       });
 
-      // STEP 2: getDisplayMedia() se screen capture prompt dikhao
-      // (User chooses "Entire screen" / "Start now")
+
+      // Android 14/15/16 Lifesaver:
+      // First, trigger native prepareScreenCapture to obtain user consent AND start
+      // the mediaProjection Foreground Service BEFORE WebRTC getDisplayMedia runs!
+      try {
+        final ready = await _platformChannel.invokeMethod('prepareScreenCapture');
+        if (ready != true) {
+          setState(() {
+            _statusMessage = 'अनुमति नहीं मिली या रद्द कर दी गई।';
+          });
+          return;
+        }
+      } catch (nativeErr) {
+        debugPrint('prepareScreenCapture notice: $nativeErr');
+      }
+
+      // NOW the Foreground Service of type mediaProjection is ALREADY RUNNING!
+      // getDisplayMedia() will succeed on Android 16 without any SecurityException!
       final mediaConstraints = <String, dynamic>{
         'audio': false,
         'video': true,
@@ -398,27 +414,6 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
 
       MediaStream stream = await navigator.mediaDevices.getDisplayMedia(mediaConstraints);
       _screenStream = stream;
-
-      // STEP 3: Android Sep 2026 Security Patch Rule:
-      // Start Foreground Service STRICTLY AFTER user grants MediaProjection permission!
-      try {
-        if (await FlutterForegroundTask.isRunningService == false) {
-          await FlutterForegroundTask.startService(
-            notificationTitle: 'KidGuard Live Streaming',
-            notificationText: 'स्क्रीन माता-पिता के फोन पर प्रसारित हो रही है',
-            callback: startCallback,
-          );
-        }
-      } catch (fgsError) {
-        debugPrint('FlutterForegroundTask notice: $fgsError');
-      }
-
-      // Native Foreground Service helper (Android 14/15/16 compliant)
-      try {
-        await _platformChannel.invokeMethod('startScreenCapture');
-      } catch (e) {
-        debugPrint('startScreenCapture notice: $e');
-      }
 
       stream.getVideoTracks().forEach((track) {
         track.onEnded = () {
