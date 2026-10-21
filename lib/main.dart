@@ -337,8 +337,12 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       });
 
       // 1. Android 13/14/15/16: Notification & Core Permissions
-      await Permission.notification.request();
-      await [Permission.camera, Permission.microphone].request();
+      try {
+        await Permission.notification.request();
+        await [Permission.camera, Permission.microphone].request();
+      } catch (permError) {
+        debugPrint('Permission notice: $permError');
+      }
 
       // 2. Start Foreground Watchdog Service safely (dataSync type prevents Android 14/15/16 crash)
       try {

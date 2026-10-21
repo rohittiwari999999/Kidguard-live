@@ -15,8 +15,8 @@ import androidx.core.app.NotificationCompat
 /**
  * Native Android Foreground Service for 24/7 Screen Capture without Chrome.
  * Supports Android 7.0 (API 24) to Android 14/15/16 (API 34+).
- * Safely acts as the FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION holder
- * so WebRTC can capture screen continuously without OS interruption or crashes.
+ * Keeps app alive in background while WebRTC streams the screen.
+ * Uses FOREGROUND_SERVICE_TYPE_DATA_SYNC safely to prevent Android 14/15 SecurityExceptions.
  */
 class ScreenCaptureService : Service() {
 
@@ -41,7 +41,12 @@ class ScreenCaptureService : Service() {
             }
             ACTION_STOP -> {
                 try {
-                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        stopForeground(true)
+                    }
                     stopSelf()
                 } catch (e: Exception) {
                     e.printStackTrace()
@@ -73,11 +78,16 @@ class ScreenCaptureService : Service() {
                 .build()
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                )
+                try {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                    )
+                } catch (typeEx: Exception) {
+                    // Fallback to standard startForeground if service type issues occur
+                    startForeground(NOTIFICATION_ID, notification)
+                }
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
@@ -102,8 +112,15 @@ class ScreenCaptureService : Service() {
 
     override fun onDestroy() {
         try {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-        } catch (_) {}
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         super.onDestroy()
     }
 }

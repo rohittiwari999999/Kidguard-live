@@ -41,10 +41,10 @@
             android:foregroundServiceType="dataSync"
             android:stopWithTask="true" />
 
-        <!-- Native Android MediaProjection Screen Capture Service (Started strictly AFTER user grants MediaProjection) -->
+        <!-- Native Android Screen Streaming Helper Foreground Service (dataSync type prevents Android 14/15/16 SecurityException crash) -->
         <service
             android:name=".ScreenCaptureService"
-            android:foregroundServiceType="mediaProjection"
+            android:foregroundServiceType="dataSync"
             android:exported="false" />
 
         <meta-data

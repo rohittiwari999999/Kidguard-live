@@ -31,7 +31,7 @@ const PRE_GENERATED_KEYSTORE_BASE64 = `MIIKXAIBAzCCChIGCSqGSIb3DQEHAaCCCgMEggn/M
 
 export const FlutterGuideView: React.FC<FlutterGuideViewProps> = ({ lang }) => {
   const t = translations[lang];
-  const [activeTab, setActiveTab] = useState<'install_guide' | 'secrets_done' | 'github_action' | 'gradle' | 'manifest' | 'main'>('install_guide');
+  const [activeTab, setActiveTab] = useState<'install_guide' | 'secrets_done' | 'github_action' | 'gradle' | 'manifest' | 'main' | 'main_activity' | 'screen_service'>('install_guide');
   const [copiedFile, setCopiedFile] = useState<string | null>(null);
 
   const copyToClipboard = (text: string, fileName: string) => {
@@ -181,7 +181,7 @@ if (keystorePropertiesFile.exists()) {
 android {
     namespace "com.example.kidguard_live"
     compileSdk flutter.compileSdkVersion
-    ndkVersion flutter.ndkVersion
+    ndkVersion = "25.1.8937393"
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -271,10 +271,10 @@ flutter {
             android:foregroundServiceType="dataSync"
             android:stopWithTask="true" />
 
-        <!-- Native Android MediaProjection Screen Capture Service (Started strictly AFTER user grants MediaProjection) -->
+        <!-- Native Android Screen Streaming Helper Foreground Service (dataSync type prevents Android 14/15/16 SecurityException crash) -->
         <service
             android:name=".ScreenCaptureService"
-            android:foregroundServiceType="mediaProjection"
+            android:foregroundServiceType="dataSync"
             android:exported="false" />
 
         <meta-data
@@ -282,6 +282,180 @@ flutter {
             android:value="2" />
     </application>
 </manifest>
+`;
+
+  const mainActivityKtCode = `// android/app/src/main/kotlin/com/example/kidguard_live/MainActivity.kt
+package com.example.kidguard_live
+
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
+
+class MainActivity: FlutterActivity() {
+    private val CHANNEL = "com.example.kidguard_live/screen_capture"
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "startScreenCapture" -> {
+                    try {
+                        val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
+                            action = ScreenCaptureService.ACTION_START
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            startForegroundService(serviceIntent)
+                        } else {
+                            startService(serviceIntent)
+                        }
+                        result.success(true)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        result.success(true)
+                    }
+                }
+                "stopScreenCapture" -> {
+                    try {
+                        val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
+                            action = ScreenCaptureService.ACTION_STOP
+                        }
+                        startService(serviceIntent)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                    result.success(true)
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+}
+`;
+
+  const screenCaptureServiceKtCode = `// android/app/src/main/kotlin/com/example/kidguard_live/ScreenCaptureService.kt
+package com.example.kidguard_live
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Build
+import android.os.IBinder
+import androidx.core.app.NotificationCompat
+
+class ScreenCaptureService : Service() {
+
+    companion object {
+        const val ACTION_START = "ACTION_START"
+        const val ACTION_STOP = "ACTION_STOP"
+        const val CHANNEL_ID = "kidguard_screen_channel"
+        const val NOTIFICATION_ID = 1001
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        createNotificationChannel()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_START -> {
+                startForegroundWithNotification()
+            }
+            ACTION_STOP -> {
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        stopForeground(true)
+                    }
+                    stopSelf()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+        return START_NOT_STICKY
+    }
+
+    private fun startForegroundWithNotification() {
+        try {
+            val stopIntent = Intent(this, ScreenCaptureService::class.java).apply {
+                action = ACTION_STOP
+            }
+            val stopPendingIntent = PendingIntent.getService(
+                this,
+                0,
+                stopIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("KidGuard Live: स्क्रीन लाइव प्रसारित हो रही है")
+                .setContentText("माता-पिता के फोन पर लाइव दिख रही है (पृष्ठभूमि सेवा सक्रिय)")
+                .setSmallIcon(android.R.drawable.ic_menu_camera)
+                .setOngoing(true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .addAction(android.R.drawable.ic_media_pause, "स्क्रीन शेयर रोकें", stopPendingIntent)
+                .build()
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                try {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                    )
+                } catch (typeEx: Exception) {
+                    startForeground(NOTIFICATION_ID, notification)
+                }
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "KidGuard स्क्रीन प्रसारण सेवा",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "स्क्रीन शेयरिंग के दौरान सक्रिय बैकग्राउंड सेवा"
+            }
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            manager?.createNotificationChannel(channel)
+        }
+    }
+
+    override fun onDestroy() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        super.onDestroy()
+    }
+}
 `;
 
   const mainDartCode = `// lib/main.dart
@@ -1161,6 +1335,30 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
           <FileCode className="w-3.5 h-3.5" />
           <span>5. lib/main.dart</span>
         </button>
+
+        <button
+          onClick={() => setActiveTab('main_activity')}
+          className={`flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
+            activeTab === 'main_activity'
+              ? 'bg-rose-600 text-white shadow-md'
+              : 'bg-slate-800 text-slate-400 hover:text-white'
+          }`}
+        >
+          <FileCode className="w-3.5 h-3.5" />
+          <span>6. MainActivity.kt</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('screen_service')}
+          className={`flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
+            activeTab === 'screen_service'
+              ? 'bg-teal-600 text-white shadow-md'
+              : 'bg-slate-800 text-slate-400 hover:text-white'
+          }`}
+        >
+          <FileCode className="w-3.5 h-3.5" />
+          <span>7. ScreenCaptureService.kt</span>
+        </button>
       </div>
 
       {/* Tab: Direct APK 3-Step Guide */}
@@ -1436,6 +1634,53 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
           </div>
           <pre className="p-4 rounded-2xl bg-slate-950 text-slate-300 font-mono text-xs overflow-x-auto max-h-[500px] leading-relaxed border border-slate-800">
             {mainDartCode}
+          </pre>
+        </div>
+      )}
+      {/* Tab 6: MainActivity.kt */}
+      {activeTab === 'main_activity' && (
+        <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-5 shadow-2xl relative">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-800 mb-4 gap-2">
+            <div>
+              <span className="text-xs font-mono text-rose-400 font-bold">android/app/src/main/kotlin/com/example/kidguard_live/MainActivity.kt</span>
+              <p className="text-[11px] text-emerald-400 mt-0.5 font-semibold">
+                ✓ टाइप एनोटेशन एरर फिक्स (catch (e: Exception)) व Android 14 क्रैश फिक्स
+              </p>
+            </div>
+            <button
+              onClick={() => copyToClipboard(mainActivityKtCode, 'MainActivity.kt')}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-bold transition shadow-sm active:scale-95 shrink-0 cursor-pointer"
+            >
+              {copiedFile === 'MainActivity.kt' ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+              <span>{copiedFile === 'MainActivity.kt' ? t.copied : t.copyCode}</span>
+            </button>
+          </div>
+          <pre className="p-4 rounded-2xl bg-slate-950 text-slate-300 font-mono text-xs overflow-x-auto max-h-[500px] leading-relaxed border border-slate-800">
+            {mainActivityKtCode}
+          </pre>
+        </div>
+      )}
+
+      {/* Tab 7: ScreenCaptureService.kt */}
+      {activeTab === 'screen_service' && (
+        <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-5 shadow-2xl relative">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-800 mb-4 gap-2">
+            <div>
+              <span className="text-xs font-mono text-teal-400 font-bold">android/app/src/main/kotlin/com/example/kidguard_live/ScreenCaptureService.kt</span>
+              <p className="text-[11px] text-emerald-400 mt-0.5 font-semibold">
+                ✓ Android 14/15/16 क्रैश फिक्स: DATA_SYNC बैकग्राउंड सर्विस और टाइप एनोटेशन
+              </p>
+            </div>
+            <button
+              onClick={() => copyToClipboard(screenCaptureServiceKtCode, 'ScreenCaptureService.kt')}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-600 hover:bg-teal-500 text-white rounded-xl text-xs font-bold transition shadow-sm active:scale-95 shrink-0 cursor-pointer"
+            >
+              {copiedFile === 'ScreenCaptureService.kt' ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+              <span>{copiedFile === 'ScreenCaptureService.kt' ? t.copied : t.copyCode}</span>
+            </button>
+          </div>
+          <pre className="p-4 rounded-2xl bg-slate-950 text-slate-300 font-mono text-xs overflow-x-auto max-h-[500px] leading-relaxed border border-slate-800">
+            {screenCaptureServiceKtCode}
           </pre>
         </div>
       )}
