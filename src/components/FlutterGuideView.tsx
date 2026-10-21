@@ -300,8 +300,6 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.example.kidguard_live/screen_capture"
-    private val REQUEST_SCREEN_CAPTURE = 2001
-    private var pendingResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -309,15 +307,8 @@ class MainActivity: FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
                 "prepareScreenCapture" -> {
-                    try {
-                        pendingResult = result
-                        val mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                        startActivityForResult(mediaProjectionManager.createScreenCaptureIntent(), REQUEST_SCREEN_CAPTURE)
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                        result.error("ERROR", e.message, null)
-                        pendingResult = null
-                    }
+                    // No separate native dialog! flutter_webrtc will show the single system dialog.
+                    result.success(true)
                 }
                 "stopScreenCapture" -> {
                     try {
@@ -336,33 +327,33 @@ class MainActivity: FlutterActivity() {
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQUEST_SCREEN_CAPTURE) {
-            if (resultCode == Activity.RESULT_OK && data != null) {
-                try {
-                    // Start Foreground Service with type mediaProjection immediately upon user consent!
-                    val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
-                        action = ScreenCaptureService.ACTION_START
-                    }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        startForegroundService(serviceIntent)
-                    } else {
-                        startService(serviceIntent)
-                    }
-                } catch (e: Exception) {
-                    e.printStackTrace()
+        // Android 14/15/16 Single-Dialog Solution:
+        // When flutter_webrtc's single screen capture dialog completes with RESULT_OK:
+        // 1. Immediately launch ScreenCaptureService (foreground service of type mediaProjection)
+        // 2. Postpone super.onActivityResult by 450ms so the service transitions to active foreground
+        // 3. flutter_webrtc then calls getMediaProjection() successfully without SecurityException!
+        if (resultCode == Activity.RESULT_OK && data != null) {
+            try {
+                val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
+                    action = ScreenCaptureService.ACTION_START
                 }
-
-                // Give the service 400ms to establish foreground state before resolving Flutter promise
-                Handler(Looper.getMainLooper()).postDelayed({
-                    pendingResult?.success(true)
-                    pendingResult = null
-                }, 400)
-            } else {
-                pendingResult?.error("DENIED", "Screen capture permission denied", null)
-                pendingResult = null
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(serviceIntent)
+                } else {
+                    startService(serviceIntent)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
+
+            // Give 450ms for the Android OS to register the mediaProjection foreground service
+            Handler(Looper.getMainLooper()).postDelayed({
+                super.onActivityResult(requestCode, resultCode, data)
+            }, 450)
+            return
         }
+
+        super.onActivityResult(requestCode, resultCode, data)
     }
 }
 `;
@@ -510,26 +501,61 @@ const String kDefaultSignalingServer = 'https://ais-dev-6snjgczxe5mnz34fbgzs4p-7
 class SignalingService {
   final String baseUrl;
   final HttpClient _client = HttpClient()
-    ..connectionTimeout = const Duration(seconds: 10)
+    ..connectionTimeout = const Duration(seconds: 8)
     ..badCertificateCallback = ((X509Certificate cert, String host, int port) => true);
 
   SignalingService({this.baseUrl = kDefaultSignalingServer});
 
+  String _cleanCode(String code) {
+    return code.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '').toLowerCase();
+  }
+
   Future<bool> sendOffer(String roomCode, String sdp, String type) async {
+    final clean = _cleanCode(roomCode);
+    bool ok = false;
+    try {
+      final uri = Uri.parse('https://ntfy.sh/kg_signal_\${clean}_offer');
+      final request = await _client.postUrl(uri);
+      request.headers.contentType = ContentType.json;
+      request.write(jsonEncode({'sdp': sdp, 'type': type, 'timestamp': DateTime.now().millisecondsSinceEpoch}));
+      final response = await request.close();
+      if (response.statusCode == 200) ok = true;
+    } catch (_) {}
+
     try {
       final uri = Uri.parse('\${baseUrl}/api/signal/room/\${roomCode}/offer');
       final request = await _client.postUrl(uri);
       request.headers.contentType = ContentType.json;
       request.write(jsonEncode({'sdp': sdp, 'type': type}));
       final response = await request.close();
-      return response.statusCode == 200;
-    } catch (e) {
-      debugPrint('Signaling sendOffer error: \$e');
-      return false;
-    }
+      if (response.statusCode == 200) ok = true;
+    } catch (_) {}
+
+    return ok;
   }
 
   Future<Map<String, dynamic>?> getOffer(String roomCode) async {
+    final clean = _cleanCode(roomCode);
+    try {
+      final uri = Uri.parse('https://ntfy.sh/kg_signal_\${clean}_offer/json?poll=1');
+      final request = await _client.getUrl(uri);
+      final response = await request.close();
+      if (response.statusCode == 200) {
+        final body = await response.transform(utf8.decoder).join();
+        final lines = body.trim().split('\\n');
+        for (final line in lines.reversed) {
+          if (line.trim().isEmpty) continue;
+          final json = jsonDecode(line);
+          if (json is Map && json['message'] != null) {
+            final payload = jsonDecode(json['message']);
+            if (payload is Map && payload['sdp'] != null) {
+              return Map<String, dynamic>.from(payload);
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
     try {
       final uri = Uri.parse('\${baseUrl}/api/signal/room/\${roomCode}/offer');
       final request = await _client.getUrl(uri);
@@ -538,27 +564,57 @@ class SignalingService {
         final body = await response.transform(utf8.decoder).join();
         return jsonDecode(body) as Map<String, dynamic>;
       }
-    } catch (e) {
-      debugPrint('Signaling getOffer error: \$e');
-    }
+    } catch (_) {}
+
     return null;
   }
 
   Future<bool> sendAnswer(String roomCode, String sdp, String type) async {
+    final clean = _cleanCode(roomCode);
+    bool ok = false;
+    try {
+      final uri = Uri.parse('https://ntfy.sh/kg_signal_\${clean}_answer');
+      final request = await _client.postUrl(uri);
+      request.headers.contentType = ContentType.json;
+      request.write(jsonEncode({'sdp': sdp, 'type': type, 'timestamp': DateTime.now().millisecondsSinceEpoch}));
+      final response = await request.close();
+      if (response.statusCode == 200) ok = true;
+    } catch (_) {}
+
     try {
       final uri = Uri.parse('\${baseUrl}/api/signal/room/\${roomCode}/answer');
       final request = await _client.postUrl(uri);
       request.headers.contentType = ContentType.json;
       request.write(jsonEncode({'sdp': sdp, 'type': type}));
       final response = await request.close();
-      return response.statusCode == 200;
-    } catch (e) {
-      debugPrint('Signaling sendAnswer error: \$e');
-      return false;
-    }
+      if (response.statusCode == 200) ok = true;
+    } catch (_) {}
+
+    return ok;
   }
 
   Future<Map<String, dynamic>?> getAnswer(String roomCode) async {
+    final clean = _cleanCode(roomCode);
+    try {
+      final uri = Uri.parse('https://ntfy.sh/kg_signal_\${clean}_answer/json?poll=1');
+      final request = await _client.getUrl(uri);
+      final response = await request.close();
+      if (response.statusCode == 200) {
+        final body = await response.transform(utf8.decoder).join();
+        final lines = body.trim().split('\\n');
+        for (final line in lines.reversed) {
+          if (line.trim().isEmpty) continue;
+          final json = jsonDecode(line);
+          if (json is Map && json['message'] != null) {
+            final payload = jsonDecode(json['message']);
+            if (payload is Map && payload['sdp'] != null) {
+              return Map<String, dynamic>.from(payload);
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
     try {
       final uri = Uri.parse('\${baseUrl}/api/signal/room/\${roomCode}/answer');
       final request = await _client.getUrl(uri);
@@ -567,13 +623,28 @@ class SignalingService {
         final body = await response.transform(utf8.decoder).join();
         return jsonDecode(body) as Map<String, dynamic>;
       }
-    } catch (e) {
-      debugPrint('Signaling getAnswer error: \$e');
-    }
+    } catch (_) {}
+
     return null;
   }
 
   Future<bool> sendCandidate(String roomCode, String candidate, String? sdpMid, int? sdpMLineIndex, String sender) async {
+    final clean = _cleanCode(roomCode);
+    try {
+      final topic = 'kg_signal_\${clean}_cand_\$sender';
+      final uri = Uri.parse('https://ntfy.sh/\$topic');
+      final request = await _client.postUrl(uri);
+      request.headers.contentType = ContentType.json;
+      request.write(jsonEncode({
+        'candidate': candidate,
+        'sdpMid': sdpMid,
+        'sdpMLineIndex': sdpMLineIndex,
+        'sender': sender,
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+      }));
+      await request.close();
+    } catch (_) {}
+
     try {
       final uri = Uri.parse('\${baseUrl}/api/signal/room/\${roomCode}/candidate');
       final request = await _client.postUrl(uri);
@@ -584,30 +655,57 @@ class SignalingService {
         'sdpMLineIndex': sdpMLineIndex,
         'sender': sender,
       }));
-      final response = await request.close();
-      return response.statusCode == 200;
-    } catch (e) {
-      debugPrint('Signaling sendCandidate error: \$e');
-      return false;
-    }
+      await request.close();
+    } catch (_) {}
+
+    return true;
   }
 
   Future<List<Map<String, dynamic>>> getCandidates(String roomCode, String forRole, int sinceTimestamp) async {
+    final clean = _cleanCode(roomCode);
+    final targetSender = forRole == 'kid' ? 'parent' : 'kid';
+    final List<Map<String, dynamic>> results = [];
+
     try {
-      final uri = Uri.parse('\${baseUrl}/api/signal/room/\${roomCode}/candidates?for=\${forRole}&since=\${sinceTimestamp}');
+      final topic = 'kg_signal_\${clean}_cand_\$targetSender';
+      final uri = Uri.parse('https://ntfy.sh/\$topic/json?poll=1');
       final request = await _client.getUrl(uri);
       final response = await request.close();
       if (response.statusCode == 200) {
         final body = await response.transform(utf8.decoder).join();
-        final data = jsonDecode(body);
-        if (data is Map && data['candidates'] is List) {
-          return List<Map<String, dynamic>>.from(data['candidates']);
+        final lines = body.trim().split('\\n');
+        for (final line in lines) {
+          if (line.trim().isEmpty) continue;
+          final json = jsonDecode(line);
+          if (json is Map && json['message'] != null) {
+            final payload = jsonDecode(json['message']);
+            if (payload is Map && payload['candidate'] != null) {
+              final ts = payload['timestamp'] as int? ?? 0;
+              if (ts > sinceTimestamp) {
+                results.add(Map<String, dynamic>.from(payload));
+              }
+            }
+          }
         }
       }
-    } catch (e) {
-      debugPrint('Signaling getCandidates error: \$e');
+    } catch (_) {}
+
+    if (results.isEmpty) {
+      try {
+        final uri = Uri.parse('\${baseUrl}/api/signal/room/\${roomCode}/candidates?for=\${forRole}&since=\${sinceTimestamp}');
+        final request = await _client.getUrl(uri);
+        final response = await request.close();
+        if (response.statusCode == 200) {
+          final body = await response.transform(utf8.decoder).join();
+          final data = jsonDecode(body);
+          if (data is Map && data['candidates'] is List) {
+            return List<Map<String, dynamic>>.from(data['candidates']);
+          }
+        }
+      } catch (_) {}
     }
-    return [];
+
+    return results;
   }
 }
 

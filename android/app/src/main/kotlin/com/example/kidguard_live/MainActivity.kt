@@ -3,7 +3,6 @@ package com.example.kidguard_live
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
-import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -13,8 +12,6 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.example.kidguard_live/screen_capture"
-    private val REQUEST_SCREEN_CAPTURE = 2001
-    private var pendingResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -22,15 +19,8 @@ class MainActivity: FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
                 "prepareScreenCapture" -> {
-                    try {
-                        pendingResult = result
-                        val mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                        startActivityForResult(mediaProjectionManager.createScreenCaptureIntent(), REQUEST_SCREEN_CAPTURE)
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                        result.error("ERROR", e.message, null)
-                        pendingResult = null
-                    }
+                    // No separate native dialog! flutter_webrtc will show the single system dialog.
+                    result.success(true)
                 }
                 "stopScreenCapture" -> {
                     try {
@@ -49,32 +39,32 @@ class MainActivity: FlutterActivity() {
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQUEST_SCREEN_CAPTURE) {
-            if (resultCode == Activity.RESULT_OK && data != null) {
-                try {
-                    // Start Foreground Service with type mediaProjection immediately upon user consent!
-                    val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
-                        action = ScreenCaptureService.ACTION_START
-                    }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        startForegroundService(serviceIntent)
-                    } else {
-                        startService(serviceIntent)
-                    }
-                } catch (e: Exception) {
-                    e.printStackTrace()
+        // Android 14/15/16 Single-Dialog Solution:
+        // When flutter_webrtc's single screen capture dialog completes with RESULT_OK:
+        // 1. Immediately launch ScreenCaptureService (foreground service of type mediaProjection)
+        // 2. Postpone super.onActivityResult by 450ms so the service transitions to active foreground
+        // 3. flutter_webrtc then calls getMediaProjection() successfully without SecurityException!
+        if (resultCode == Activity.RESULT_OK && data != null) {
+            try {
+                val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
+                    action = ScreenCaptureService.ACTION_START
                 }
-
-                // Give the service 400ms to establish foreground state before resolving Flutter promise
-                Handler(Looper.getMainLooper()).postDelayed({
-                    pendingResult?.success(true)
-                    pendingResult = null
-                }, 400)
-            } else {
-                pendingResult?.error("DENIED", "Screen capture permission denied", null)
-                pendingResult = null
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(serviceIntent)
+                } else {
+                    startService(serviceIntent)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
+
+            // Give 450ms for the Android OS to register the mediaProjection foreground service
+            Handler(Looper.getMainLooper()).postDelayed({
+                super.onActivityResult(requestCode, resultCode, data)
+            }, 450)
+            return
         }
+
+        super.onActivityResult(requestCode, resultCode, data)
     }
 }

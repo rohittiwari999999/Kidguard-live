@@ -303,9 +303,14 @@ export class PeerManager {
   private queuedCandidates: RTCIceCandidate[] = [];
   private lastCandidateTs = 0;
 
+  private cleanCode(code: string): string {
+    return code.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+
   async startHttpChildBroadcast(roomCode: string, stream: MediaStream) {
     this.stopHttpSignaling();
-    const cleanCode = roomCode.trim().toUpperCase();
+    const clean = this.cleanCode(roomCode);
+    const rawCode = roomCode.trim().toUpperCase();
 
     try {
       this.httpPc = new RTCPeerConnection({
@@ -318,20 +323,27 @@ export class PeerManager {
 
       this.httpPc.onicecandidate = (event) => {
         if (event.candidate) {
-          fetch(`/api/signal/room/${cleanCode}/candidate`, {
+          const candPayload = {
+            candidate: event.candidate.candidate,
+            sdpMid: event.candidate.sdpMid,
+            sdpMLineIndex: event.candidate.sdpMLineIndex,
+            sender: 'kid',
+            timestamp: Date.now(),
+          };
+          // Send to ntfy
+          fetch(`https://ntfy.sh/kg_signal_${clean}_cand_kid`, {
+            method: 'POST',
+            body: JSON.stringify(candPayload),
+          }).catch(() => {});
+          // Send to local
+          fetch(`/api/signal/room/${rawCode}/candidate`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              candidate: event.candidate.candidate,
-              sdpMid: event.candidate.sdpMid,
-              sdpMLineIndex: event.candidate.sdpMLineIndex,
-              sender: 'kid',
-            }),
+            body: JSON.stringify(candPayload),
           }).catch(() => {});
         }
       };
 
-      // Exact Sequence Rule: addTrack BEFORE createOffer!
       stream.getTracks().forEach((track) => {
         this.httpPc?.addTrack(track, stream);
       });
@@ -339,31 +351,63 @@ export class PeerManager {
       const offer = await this.httpPc.createOffer();
       await this.httpPc.setLocalDescription(offer);
 
-      await fetch(`/api/signal/room/${cleanCode}/offer`, {
+      const offerPayload = { sdp: offer.sdp, type: offer.type, timestamp: Date.now() };
+
+      // 1. Post to ntfy
+      fetch(`https://ntfy.sh/kg_signal_${clean}_offer`, {
+        method: 'POST',
+        body: JSON.stringify(offerPayload),
+      }).catch(() => {});
+
+      // 2. Post to local
+      fetch(`/api/signal/room/${rawCode}/offer`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sdp: offer.sdp, type: offer.type }),
-      });
+        body: JSON.stringify(offerPayload),
+      }).catch(() => {});
 
       // Poll for parent answer
       this.httpPollTimer = setInterval(async () => {
         if (this.isHttpRemoteDescSet || !this.httpPc) return;
         try {
-          const res = await fetch(`/api/signal/room/${cleanCode}/answer`);
-          if (res.ok) {
-            const data = await res.json();
-            if (data?.sdp && !this.isHttpRemoteDescSet) {
-              this.isHttpRemoteDescSet = true;
-              clearInterval(this.httpPollTimer);
-              await this.httpPc.setRemoteDescription(new RTCSessionDescription(data));
-              // Drain candidates
-              for (const c of this.queuedCandidates) {
-                await this.httpPc.addIceCandidate(c).catch(() => {});
+          let answerData: any = null;
+          // Try ntfy first
+          try {
+            const ntfyRes = await fetch(`https://ntfy.sh/kg_signal_${clean}_answer/json?poll=1`);
+            if (ntfyRes.ok) {
+              const text = await ntfyRes.text();
+              const lines = text.trim().split('\n');
+              for (const line of lines.reverse()) {
+                if (!line) continue;
+                const parsed = JSON.parse(line);
+                if (parsed.message) {
+                  const inner = JSON.parse(parsed.message);
+                  if (inner.sdp) {
+                    answerData = inner;
+                    break;
+                  }
+                }
               }
-              this.queuedCandidates = [];
-              this.startListeningToCandidates(cleanCode, 'kid');
-              this.onConnectionStatusCallback?.('connected');
             }
+          } catch {}
+
+          if (!answerData) {
+            const localRes = await fetch(`/api/signal/room/${rawCode}/answer`);
+            if (localRes.ok) {
+              answerData = await localRes.json();
+            }
+          }
+
+          if (answerData?.sdp && !this.isHttpRemoteDescSet) {
+            this.isHttpRemoteDescSet = true;
+            clearInterval(this.httpPollTimer);
+            await this.httpPc.setRemoteDescription(new RTCSessionDescription(answerData));
+            for (const c of this.queuedCandidates) {
+              await this.httpPc.addIceCandidate(c).catch(() => {});
+            }
+            this.queuedCandidates = [];
+            this.startListeningToCandidates(roomCode, 'kid');
+            this.onConnectionStatusCallback?.('connected');
           }
         } catch {}
       }, 1000);
@@ -374,13 +418,45 @@ export class PeerManager {
 
   async startHttpParentWatch(roomCode: string, onStream: (stream: MediaStream) => void) {
     this.stopHttpSignaling();
-    const cleanCode = roomCode.trim().toUpperCase();
+    const clean = this.cleanCode(roomCode);
+    const rawCode = roomCode.trim().toUpperCase();
 
     const tryConnect = async () => {
       try {
-        const res = await fetch(`/api/signal/room/${cleanCode}/offer`);
-        if (!res.ok) return false;
-        const offerData = await res.json();
+        let offerData: any = null;
+
+        // 1. Try fetching offer from ntfy.sh (primary for cross-device mobile connections)
+        try {
+          const ntfyRes = await fetch(`https://ntfy.sh/kg_signal_${clean}_offer/json?poll=1`);
+          if (ntfyRes.ok) {
+            const text = await ntfyRes.text();
+            const lines = text.trim().split('\n');
+            for (const line of lines.reverse()) {
+              if (!line) continue;
+              try {
+                const parsed = JSON.parse(line);
+                if (parsed.message) {
+                  const inner = JSON.parse(parsed.message);
+                  if (inner.sdp) {
+                    offerData = inner;
+                    break;
+                  }
+                }
+              } catch {}
+            }
+          }
+        } catch (e) {
+          console.warn('ntfy poll offer error:', e);
+        }
+
+        // 2. Fallback to local server
+        if (!offerData || !offerData.sdp) {
+          const localRes = await fetch(`/api/signal/room/${rawCode}/offer`);
+          if (localRes.ok) {
+            offerData = await localRes.json();
+          }
+        }
+
         if (!offerData?.sdp) return false;
 
         this.httpPc = new RTCPeerConnection({
@@ -391,7 +467,6 @@ export class PeerManager {
           ],
         });
 
-        // Debug Check 1: ICE state
         this.httpPc.oniceconnectionstatechange = () => {
           const state = this.httpPc?.iceConnectionState;
           console.log(`📡 [HTTP WebRTC] ICE Connection State: ${state}`);
@@ -402,7 +477,6 @@ export class PeerManager {
           }
         };
 
-        // Fix 2: Unified Plan ontrack Fallback
         this.httpPc.ontrack = (event: RTCTrackEvent) => {
           console.log(`🔥 [HTTP WebRTC] Track received: ${event.track.kind}, streams count: ${event.streams?.length || 0}`);
           let streamToUse: MediaStream;
@@ -417,33 +491,45 @@ export class PeerManager {
 
         this.httpPc.onicecandidate = (event) => {
           if (event.candidate) {
-            fetch(`/api/signal/room/${cleanCode}/candidate`, {
+            const candPayload = {
+              candidate: event.candidate.candidate,
+              sdpMid: event.candidate.sdpMid,
+              sdpMLineIndex: event.candidate.sdpMLineIndex,
+              sender: 'parent',
+              timestamp: Date.now(),
+            };
+            fetch(`https://ntfy.sh/kg_signal_${clean}_cand_parent`, {
+              method: 'POST',
+              body: JSON.stringify(candPayload),
+            }).catch(() => {});
+            fetch(`/api/signal/room/${rawCode}/candidate`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                candidate: event.candidate.candidate,
-                sdpMid: event.candidate.sdpMid,
-                sdpMLineIndex: event.candidate.sdpMLineIndex,
-                sender: 'parent',
-              }),
+              body: JSON.stringify(candPayload),
             }).catch(() => {});
           }
         };
 
-        // Timing Rule: setRemoteDescription BEFORE adding candidates!
         await this.httpPc.setRemoteDescription(new RTCSessionDescription(offerData));
         this.isHttpRemoteDescSet = true;
 
         const answer = await this.httpPc.createAnswer();
         await this.httpPc.setLocalDescription(answer);
 
-        await fetch(`/api/signal/room/${cleanCode}/answer`, {
+        const answerPayload = { sdp: answer.sdp, type: answer.type, timestamp: Date.now() };
+
+        fetch(`https://ntfy.sh/kg_signal_${clean}_answer`, {
+          method: 'POST',
+          body: JSON.stringify(answerPayload),
+        }).catch(() => {});
+
+        fetch(`/api/signal/room/${rawCode}/answer`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sdp: answer.sdp, type: answer.type }),
-        });
+          body: JSON.stringify(answerPayload),
+        }).catch(() => {});
 
-        this.startListeningToCandidates(cleanCode, 'parent');
+        this.startListeningToCandidates(roomCode, 'parent');
         return true;
       } catch (err) {
         console.warn('HTTP Parent Watch attempt failed:', err);
@@ -453,7 +539,6 @@ export class PeerManager {
 
     const connected = await tryConnect();
     if (!connected) {
-      // Poll until child offer arrives
       this.httpPollTimer = setInterval(async () => {
         if (this.httpPc) {
           clearInterval(this.httpPollTimer);
@@ -463,15 +548,51 @@ export class PeerManager {
         if (ok) {
           clearInterval(this.httpPollTimer);
         }
-      }, 2000);
+      }, 1500);
     }
   }
 
   private startListeningToCandidates(roomCode: string, forRole: 'kid' | 'parent') {
+    const clean = this.cleanCode(roomCode);
+    const rawCode = roomCode.trim().toUpperCase();
+    const targetSender = forRole === 'kid' ? 'parent' : 'kid';
+
     this.httpCandidateTimer = setInterval(async () => {
       if (!this.httpPc) return;
       try {
-        const res = await fetch(`/api/signal/room/${roomCode}/candidates?for=${forRole}&since=${this.lastCandidateTs}`);
+        // 1. Fetch from ntfy
+        try {
+          const ntfyRes = await fetch(`https://ntfy.sh/kg_signal_${clean}_cand_${targetSender}/json?poll=1`);
+          if (ntfyRes.ok) {
+            const text = await ntfyRes.text();
+            const lines = text.trim().split('\n');
+            for (const line of lines) {
+              if (!line) continue;
+              try {
+                const parsed = JSON.parse(line);
+                if (parsed.message) {
+                  const inner = JSON.parse(parsed.message);
+                  if (inner.candidate && (inner.timestamp || 0) > this.lastCandidateTs) {
+                    this.lastCandidateTs = inner.timestamp || Date.now();
+                    const candidate = new RTCIceCandidate({
+                      candidate: inner.candidate,
+                      sdpMid: inner.sdpMid,
+                      sdpMLineIndex: inner.sdpMLineIndex,
+                    });
+                    if (this.isHttpRemoteDescSet) {
+                      await this.httpPc.addIceCandidate(candidate).catch(() => {});
+                    } else {
+                      this.queuedCandidates.push(candidate);
+                    }
+                  }
+                }
+              } catch {}
+            }
+          }
+        } catch {}
+
+        // 2. Fetch from local server
+        const res = await fetch(`/api/signal/room/${rawCode}/candidates?for=${forRole}&since=${this.lastCandidateTs}`);
         if (res.ok) {
           const data = await res.json();
           if (data?.candidates && Array.isArray(data.candidates)) {

@@ -158,7 +158,6 @@ export const ParentView: React.FC<ParentViewProps> = ({
       () => {
         // Parent Peer is open and waiting for child to stream
         setConnectionStatus('connecting');
-        // Actively connect data connection to child across different devices!
         peerManager.connectData(childPeerId, () => {
           peerManager.sendMessage({
             type: 'REQUEST_STREAM',
@@ -168,7 +167,8 @@ export const ParentView: React.FC<ParentViewProps> = ({
         });
       },
       () => {
-        setConnectionStatus('disconnected');
+        // PeerJS cloud unavailable is expected when child is native Android Flutter APK
+        console.log('PeerJS fallback waiting on HTTP/ntfy bridge...');
       }
     );
 
@@ -188,9 +188,10 @@ export const ParentView: React.FC<ParentViewProps> = ({
     });
 
     peerManager.onStatusChange((status) => {
-      setConnectionStatus(status);
-      if (status === 'disconnected') {
-        setHasStream(false);
+      if (status === 'connected') {
+        setConnectionStatus('connected');
+      } else if (status === 'connecting') {
+        setConnectionStatus((prev) => prev === 'connected' ? 'connected' : 'connecting');
       }
     });
 
