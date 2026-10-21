@@ -761,18 +761,6 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       await Permission.notification.request();
       await [Permission.camera, Permission.microphone].request();
 
-      try {
-        if (await FlutterForegroundTask.isRunningService == false) {
-          await FlutterForegroundTask.startService(
-            notificationTitle: 'KidGuard Live Streaming',
-            notificationText: 'स्क्रीन माता-पिता के फोन पर प्रसारित हो रही है',
-            callback: startCallback,
-          );
-        }
-      } catch (fgsError) {
-        debugPrint('Foreground task: \$fgsError');
-      }
-
       // 1. Pehle createPeerConnection() call karo
       _peerConnection = await createPeerConnection(_iceServers);
 
@@ -790,13 +778,29 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         }
       };
 
-      // 2. Fir getDisplayMedia() se screen stream lo (Clean single call)
+      // 2. Fir getDisplayMedia() se screen capture prompt dikhao ("Entire screen" / "Start now")
       MediaStream stream = await navigator.mediaDevices.getDisplayMedia({'audio': false, 'video': true});
       _screenStream = stream;
 
+      // 3. Android Sep 2026 Security Patch Rule:
+      // Start Foreground Service STRICTLY AFTER user grants MediaProjection permission!
+      try {
+        if (await FlutterForegroundTask.isRunningService == false) {
+          await FlutterForegroundTask.startService(
+            notificationTitle: 'KidGuard Live Streaming',
+            notificationText: 'स्क्रीन माता-पिता के फोन पर प्रसारित हो रही है',
+            callback: startCallback,
+          );
+        }
+      } catch (fgsError) {
+        debugPrint('Foreground task: \$fgsError');
+      }
+
       try {
         await _platformChannel.invokeMethod('startScreenCapture');
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('Native helper: \$e');
+      }
 
       stream.getVideoTracks().forEach((track) {
         track.onEnded = () {

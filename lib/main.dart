@@ -344,19 +344,6 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         debugPrint('Permission notice: $permError');
       }
 
-      // 2. Start Foreground Watchdog Service safely (dataSync type prevents Android 14/15/16 crash)
-      try {
-        if (await FlutterForegroundTask.isRunningService == false) {
-          await FlutterForegroundTask.startService(
-            notificationTitle: 'KidGuard Live Streaming',
-            notificationText: 'स्क्रीन माता-पिता के फोन पर प्रसारित हो रही है',
-            callback: startCallback,
-          );
-        }
-      } catch (fgsError) {
-        debugPrint('FlutterForegroundTask notice: $fgsError');
-      }
-
       setState(() {
         _statusMessage = '1/4: WebRTC Peer Connection तैयार हो रहा है...';
       });
@@ -402,7 +389,8 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         _statusMessage = '2/4: स्क्रीन कैप्चर अनुमति मांग रहे हैं...';
       });
 
-      // STEP 2: Fir getDisplayMedia() se screen stream lo (Clean single call)
+      // STEP 2: getDisplayMedia() se screen capture prompt dikhao
+      // (User chooses "Entire screen" / "Start now")
       final mediaConstraints = <String, dynamic>{
         'audio': false,
         'video': true,
@@ -411,10 +399,26 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       MediaStream stream = await navigator.mediaDevices.getDisplayMedia(mediaConstraints);
       _screenStream = stream;
 
-      // Start native helper notification so Android 14/15/16 keeps streaming active when minimized
+      // STEP 3: Android Sep 2026 Security Patch Rule:
+      // Start Foreground Service STRICTLY AFTER user grants MediaProjection permission!
+      try {
+        if (await FlutterForegroundTask.isRunningService == false) {
+          await FlutterForegroundTask.startService(
+            notificationTitle: 'KidGuard Live Streaming',
+            notificationText: 'स्क्रीन माता-पिता के फोन पर प्रसारित हो रही है',
+            callback: startCallback,
+          );
+        }
+      } catch (fgsError) {
+        debugPrint('FlutterForegroundTask notice: $fgsError');
+      }
+
+      // Native Foreground Service helper (Android 14/15/16 compliant)
       try {
         await _platformChannel.invokeMethod('startScreenCapture');
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('startScreenCapture notice: $e');
+      }
 
       stream.getVideoTracks().forEach((track) {
         track.onEnded = () {
