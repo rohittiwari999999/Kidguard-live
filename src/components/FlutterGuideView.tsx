@@ -265,16 +265,16 @@ flutter {
             </intent-filter>
         </activity>
 
-        <!-- General Watchdog Foreground Service (dataSync type so it starts safely before MediaProjection prompt) -->
+        <!-- General Watchdog Foreground Service (dataSync type) -->
         <service
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
             android:foregroundServiceType="dataSync"
             android:stopWithTask="true" />
 
-        <!-- Native Android Screen Streaming Helper Foreground Service (dataSync type prevents Android 14/15/16 SecurityException crash) -->
+        <!-- Native Android Screen Streaming Helper Foreground Service (mediaProjection type for Android 14/15/16) -->
         <service
             android:name=".ScreenCaptureService"
-            android:foregroundServiceType="dataSync"
+            android:foregroundServiceType="mediaProjection"
             android:exported="false" />
 
         <meta-data
@@ -287,6 +287,7 @@ flutter {
   const mainActivityKtCode = `// android/app/src/main/kotlin/com/example/kidguard_live/MainActivity.kt
 package com.example.kidguard_live
 
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -330,6 +331,28 @@ class MainActivity: FlutterActivity() {
                     result.success(true)
                 }
                 else -> result.notImplemented()
+            }
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        // Android 14/15/16 Lifesaver Fix:
+        // As soon as the user grants MediaProjection (resultCode == RESULT_OK and data != null),
+        // we start ScreenCaptureService as FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION right here
+        // so that it is ALREADY running when flutter_webrtc plugin invokes getMediaProjection!
+        if (resultCode == Activity.RESULT_OK && data != null) {
+            try {
+                val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
+                    action = ScreenCaptureService.ACTION_START
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(serviceIntent)
+                } else {
+                    startService(serviceIntent)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
     }

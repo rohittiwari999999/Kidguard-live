@@ -35,13 +35,13 @@
             </intent-filter>
         </activity>
 
-        <!-- General Watchdog Foreground Service (mediaProjection type for Android 14 Entire Screen streaming) -->
+        <!-- General Watchdog Foreground Service (dataSync type) -->
         <service
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
-            android:foregroundServiceType="mediaProjection"
+            android:foregroundServiceType="dataSync"
             android:stopWithTask="true" />
 
-        <!-- Native Android Screen Streaming Helper Foreground Service -->
+        <!-- Native Android Screen Streaming Helper Foreground Service (mediaProjection type for Android 14/15/16) -->
         <service
             android:name=".ScreenCaptureService"
             android:foregroundServiceType="mediaProjection"
