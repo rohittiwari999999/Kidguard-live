@@ -508,10 +508,23 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         _statusMessage = '2/4: स्क्रीन शेयर अनुमति मांग रहे हैं... (कृपया "Entire screen" चुनें)';
       });
 
-      // Android 14/15/16 Single System Prompt:
-      // MainActivity now starts ScreenCaptureService seamlessly inside onActivityResult
-      // with a 450ms safety delay before delivering the token to WebRTC.
-      // Thus, only ONE system dialog appears!
+      // Android 14/15/16 Lifesaver:
+      // First, trigger native prepareScreenCapture to obtain user consent AND start
+      // the mediaProjection Foreground Service BEFORE WebRTC getDisplayMedia runs!
+      try {
+        final ready = await _platformChannel.invokeMethod('prepareScreenCapture');
+        if (ready != true) {
+          setState(() {
+            _statusMessage = 'अनुमति नहीं मिली या रद्द कर दी गई।';
+          });
+          return;
+        }
+      } catch (nativeErr) {
+        debugPrint('prepareScreenCapture notice: $nativeErr');
+      }
+
+      // NOW the Foreground Service of type mediaProjection is ALREADY RUNNING!
+      // getDisplayMedia() will succeed on Android 16 without any SecurityException crash!
       final mediaConstraints = <String, dynamic>{
         'audio': false,
         'video': true,
