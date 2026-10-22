@@ -53,9 +53,11 @@ class MainActivity: FlutterActivity() {
         if (requestCode == REQUEST_SCREEN_CAPTURE) {
             if (resultCode == Activity.RESULT_OK && data != null) {
                 try {
-                    // Start Foreground Service with type mediaProjection immediately upon user consent!
+                    // Start Foreground Service with type mediaProjection and pass projection token Intent
                     val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
                         action = ScreenCaptureService.ACTION_START
+                        putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
+                        putExtra(ScreenCaptureService.EXTRA_DATA, data)
                     }
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         startForegroundService(serviceIntent)

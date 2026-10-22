@@ -31,132 +31,120 @@ class SignalingService {
     return code.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '').toLowerCase();
   }
 
-  Future<bool> sendOffer(String roomCode, String sdp, String type) async {
-    final clean = _cleanCode(roomCode);
-    bool ok = false;
-    // 1. Primary: ntfy.sh global public pub/sub (no auth/cookies needed)
-    try {
-      final uri = Uri.parse('https://ntfy.sh/kg_signal_${clean}_offer');
-      final request = await _client.postUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode({'sdp': sdp, 'type': type, 'timestamp': DateTime.now().millisecondsSinceEpoch}));
-      final response = await request.close();
-      if (response.statusCode == 200) ok = true;
-    } catch (e) {
-      debugPrint('ntfy sendOffer: $e');
+  List<String> _possibleCodes(String code) {
+    final clean = _cleanCode(code);
+    final Set<String> codes = {clean};
+    if (clean.startsWith('kid')) {
+      final numPart = clean.substring(3);
+      if (numPart.isNotEmpty) codes.add(numPart);
+    } else {
+      codes.add('kid$clean');
     }
+    return codes.toList();
+  }
 
-    // 2. Secondary: local dev server
-    try {
-      final uri = Uri.parse('$baseUrl/api/signal/room/$roomCode/offer');
-      final request = await _client.postUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode({'sdp': sdp, 'type': type}));
-      final response = await request.close();
-      if (response.statusCode == 200) ok = true;
-    } catch (_) {}
+  Future<bool> sendOffer(String roomCode, String sdp, String type) async {
+    final codes = _possibleCodes(roomCode);
+    bool ok = false;
+    final payload = jsonEncode({'sdp': sdp, 'type': type, 'timestamp': DateTime.now().millisecondsSinceEpoch});
+
+    // Primary: ntfy.sh global public pub/sub
+    for (final c in codes) {
+      try {
+        final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_offer');
+        final request = await _client.postUrl(uri);
+        request.headers.contentType = ContentType.json;
+        request.write(payload);
+        final response = await request.close().timeout(const Duration(seconds: 3));
+        if (response.statusCode == 200) ok = true;
+      } catch (e) {
+        debugPrint('ntfy sendOffer ($c): $e');
+      }
+    }
 
     return ok;
   }
 
   Future<Map<String, dynamic>?> getOffer(String roomCode) async {
-    final clean = _cleanCode(roomCode);
-    // 1. Primary: ntfy.sh
-    try {
-      final uri = Uri.parse('https://ntfy.sh/kg_signal_${clean}_offer/json?poll=1');
-      final request = await _client.getUrl(uri);
-      final response = await request.close();
-      if (response.statusCode == 200) {
-        final body = await response.transform(utf8.decoder).join();
-        final lines = body.trim().split('\n');
-        for (final line in lines.reversed) {
-          if (line.trim().isEmpty) continue;
-          final json = jsonDecode(line);
-          if (json is Map && json['message'] != null) {
-            final payload = jsonDecode(json['message']);
-            if (payload is Map && payload['sdp'] != null) {
-              return Map<String, dynamic>.from(payload);
-            }
+    final codes = _possibleCodes(roomCode);
+    // Primary: ntfy.sh
+    for (final c in codes) {
+      try {
+        final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_offer/json?poll=1');
+        final request = await _client.getUrl(uri);
+        final response = await request.close().timeout(const Duration(seconds: 3));
+        if (response.statusCode == 200) {
+          final body = await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 3));
+          final lines = body.trim().split('\n');
+          for (final line in lines.reversed) {
+            if (line.trim().isEmpty) continue;
+            try {
+              final json = jsonDecode(line);
+              if (json is Map && json['message'] != null) {
+                final payload = jsonDecode(json['message']);
+                if (payload is Map && payload['sdp'] != null) {
+                  return Map<String, dynamic>.from(payload);
+                }
+              }
+            } catch (_) {}
           }
         }
+      } catch (e) {
+        debugPrint('ntfy getOffer ($c): $e');
       }
-    } catch (e) {
-      debugPrint('ntfy getOffer: $e');
     }
-
-    // 2. Secondary: local server
-    try {
-      final uri = Uri.parse('$baseUrl/api/signal/room/$roomCode/offer');
-      final request = await _client.getUrl(uri);
-      final response = await request.close();
-      if (response.statusCode == 200) {
-        final body = await response.transform(utf8.decoder).join();
-        return jsonDecode(body) as Map<String, dynamic>;
-      }
-    } catch (_) {}
 
     return null;
   }
 
   Future<bool> sendAnswer(String roomCode, String sdp, String type) async {
-    final clean = _cleanCode(roomCode);
+    final codes = _possibleCodes(roomCode);
     bool ok = false;
-    try {
-      final uri = Uri.parse('https://ntfy.sh/kg_signal_${clean}_answer');
-      final request = await _client.postUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode({'sdp': sdp, 'type': type, 'timestamp': DateTime.now().millisecondsSinceEpoch}));
-      final response = await request.close();
-      if (response.statusCode == 200) ok = true;
-    } catch (e) {
-      debugPrint('ntfy sendAnswer: $e');
-    }
+    final payload = jsonEncode({'sdp': sdp, 'type': type, 'timestamp': DateTime.now().millisecondsSinceEpoch});
 
-    try {
-      final uri = Uri.parse('$baseUrl/api/signal/room/$roomCode/answer');
-      final request = await _client.postUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode({'sdp': sdp, 'type': type}));
-      final response = await request.close();
-      if (response.statusCode == 200) ok = true;
-    } catch (_) {}
+    for (final c in codes) {
+      try {
+        final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_answer');
+        final request = await _client.postUrl(uri);
+        request.headers.contentType = ContentType.json;
+        request.write(payload);
+        final response = await request.close().timeout(const Duration(seconds: 3));
+        if (response.statusCode == 200) ok = true;
+      } catch (e) {
+        debugPrint('ntfy sendAnswer ($c): $e');
+      }
+    }
 
     return ok;
   }
 
   Future<Map<String, dynamic>?> getAnswer(String roomCode) async {
-    final clean = _cleanCode(roomCode);
-    try {
-      final uri = Uri.parse('https://ntfy.sh/kg_signal_${clean}_answer/json?poll=1');
-      final request = await _client.getUrl(uri);
-      final response = await request.close();
-      if (response.statusCode == 200) {
-        final body = await response.transform(utf8.decoder).join();
-        final lines = body.trim().split('\n');
-        for (final line in lines.reversed) {
-          if (line.trim().isEmpty) continue;
-          final json = jsonDecode(line);
-          if (json is Map && json['message'] != null) {
-            final payload = jsonDecode(json['message']);
-            if (payload is Map && payload['sdp'] != null) {
-              return Map<String, dynamic>.from(payload);
-            }
+    final codes = _possibleCodes(roomCode);
+    for (final c in codes) {
+      try {
+        final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_answer/json?poll=1');
+        final request = await _client.getUrl(uri);
+        final response = await request.close().timeout(const Duration(seconds: 3));
+        if (response.statusCode == 200) {
+          final body = await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 3));
+          final lines = body.trim().split('\n');
+          for (final line in lines.reversed) {
+            if (line.trim().isEmpty) continue;
+            try {
+              final json = jsonDecode(line);
+              if (json is Map && json['message'] != null) {
+                final payload = jsonDecode(json['message']);
+                if (payload is Map && payload['sdp'] != null) {
+                  return Map<String, dynamic>.from(payload);
+                }
+              }
+            } catch (_) {}
           }
         }
+      } catch (e) {
+        debugPrint('ntfy getAnswer ($c): $e');
       }
-    } catch (e) {
-      debugPrint('ntfy getAnswer: $e');
     }
-
-    try {
-      final uri = Uri.parse('$baseUrl/api/signal/room/$roomCode/answer');
-      final request = await _client.getUrl(uri);
-      final response = await request.close();
-      if (response.statusCode == 200) {
-        final body = await response.transform(utf8.decoder).join();
-        return jsonDecode(body) as Map<String, dynamic>;
-      }
-    } catch (_) {}
 
     return null;
   }
@@ -168,34 +156,25 @@ class SignalingService {
     int? sdpMLineIndex,
     String sender,
   ) async {
-    final clean = _cleanCode(roomCode);
-    try {
-      final topic = 'kg_signal_${clean}_cand_$sender';
-      final uri = Uri.parse('https://ntfy.sh/$topic');
-      final request = await _client.postUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode({
-        'candidate': candidate,
-        'sdpMid': sdpMid,
-        'sdpMLineIndex': sdpMLineIndex,
-        'sender': sender,
-        'timestamp': DateTime.now().millisecondsSinceEpoch,
-      }));
-      await request.close();
-    } catch (_) {}
+    final codes = _possibleCodes(roomCode);
+    final payload = jsonEncode({
+      'candidate': candidate,
+      'sdpMid': sdpMid,
+      'sdpMLineIndex': sdpMLineIndex,
+      'sender': sender,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+    });
 
-    try {
-      final uri = Uri.parse('$baseUrl/api/signal/room/$roomCode/candidate');
-      final request = await _client.postUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode({
-        'candidate': candidate,
-        'sdpMid': sdpMid,
-        'sdpMLineIndex': sdpMLineIndex,
-        'sender': sender,
-      }));
-      await request.close();
-    } catch (_) {}
+    for (final c in codes) {
+      try {
+        final topic = 'kg_signal_${c}_cand_$sender';
+        final uri = Uri.parse('https://ntfy.sh/$topic');
+        final request = await _client.postUrl(uri);
+        request.headers.contentType = ContentType.json;
+        request.write(payload);
+        await request.close().timeout(const Duration(seconds: 3));
+      } catch (_) {}
+    }
 
     return true;
   }
@@ -205,44 +184,33 @@ class SignalingService {
     String forRole,
     int sinceTimestamp,
   ) async {
-    final clean = _cleanCode(roomCode);
+    final codes = _possibleCodes(roomCode);
     final targetSender = forRole == 'kid' ? 'parent' : 'kid';
     final List<Map<String, dynamic>> results = [];
 
-    try {
-      final topic = 'kg_signal_${clean}_cand_$targetSender';
-      final uri = Uri.parse('https://ntfy.sh/$topic/json?poll=1');
-      final request = await _client.getUrl(uri);
-      final response = await request.close();
-      if (response.statusCode == 200) {
-        final body = await response.transform(utf8.decoder).join();
-        final lines = body.trim().split('\n');
-        for (final line in lines) {
-          if (line.trim().isEmpty) continue;
-          final json = jsonDecode(line);
-          if (json is Map && json['message'] != null) {
-            final payload = jsonDecode(json['message']);
-            if (payload is Map && payload['candidate'] != null) {
-              final ts = payload['timestamp'] as int? ?? 0;
-              if (ts > sinceTimestamp) {
-                results.add(Map<String, dynamic>.from(payload));
-              }
-            }
-          }
-        }
-      }
-    } catch (_) {}
-
-    if (results.isEmpty) {
+    for (final c in codes) {
       try {
-        final uri = Uri.parse('$baseUrl/api/signal/room/$roomCode/candidates?for=$forRole&since=$sinceTimestamp');
+        final topic = 'kg_signal_${c}_cand_$targetSender';
+        final uri = Uri.parse('https://ntfy.sh/$topic/json?poll=1');
         final request = await _client.getUrl(uri);
-        final response = await request.close();
+        final response = await request.close().timeout(const Duration(seconds: 3));
         if (response.statusCode == 200) {
-          final body = await response.transform(utf8.decoder).join();
-          final data = jsonDecode(body);
-          if (data is Map && data['candidates'] is List) {
-            return List<Map<String, dynamic>>.from(data['candidates']);
+          final body = await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 3));
+          final lines = body.trim().split('\n');
+          for (final line in lines) {
+            if (line.trim().isEmpty) continue;
+            try {
+              final json = jsonDecode(line);
+              if (json is Map && json['message'] != null) {
+                final payload = jsonDecode(json['message']);
+                if (payload is Map && payload['candidate'] != null) {
+                  final ts = payload['timestamp'] as int? ?? 0;
+                  if (ts > sinceTimestamp) {
+                    results.add(Map<String, dynamic>.from(payload));
+                  }
+                }
+              }
+            } catch (_) {}
           }
         }
       } catch (_) {}
@@ -562,21 +530,25 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       });
       await _peerConnection!.setLocalDescription(offer);
 
-      // Save Offer to Signaling Server
-      final offerSuccess = await _signaling.sendOffer(roomCode, offer.sdp!, offer.type!);
-      if (!offerSuccess) {
-        debugPrint('Warning: Could not save offer to signaling server, will retry');
-      }
-
+      // Activate sharing state and start answer polling immediately (zero UI freeze)
       setState(() {
         _isSharing = true;
         _isRemoteDescSet = false;
         _queuedCandidates.clear();
-        _statusMessage = '🔴 ब्रॉडकास्ट चालू है! माता-पिता के फोन के जुड़ने की प्रतीक्षा...';
+        _statusMessage = '🔴 ब्रॉडकास्ट चालू है! कोड: $roomCode\nमाता-पिता के जुड़ने की प्रतीक्षा...';
       });
 
-      // Poll for Parent's Answer & Candidates
+      // Poll for Parent's Answer & Candidates immediately
       _startPollingForAnswer(roomCode);
+
+      // Upload Offer asynchronously without blocking the UI or polling
+      _signaling.sendOffer(roomCode, offer.sdp!, offer.type!).then((ok) {
+        if (mounted && _isSharing) {
+          setState(() {
+            _statusMessage = '🔴 ब्रॉडकास्ट सक्रिय है! कोड: $roomCode\nमाता-पिता के जुड़ने की प्रतीक्षा...';
+          });
+        }
+      });
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -968,12 +940,12 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     });
 
     try {
-      // 1. Fetch Kid's Offer from Signaling Server (with 10 retries / 15s timeout)
+      // 1. Fetch Kid's Offer from Signaling Server (with 30 retries / ~45s window)
       Map<String, dynamic>? offerData;
-      for (int attempt = 1; attempt <= 10; attempt++) {
+      for (int attempt = 1; attempt <= 30; attempt++) {
         if (!mounted || !_isConnecting) return;
         setState(() {
-          _statusText = 'बच्चे के फोन से सिग्नल खोज रहे हैं... (प्रयास $attempt/10)';
+          _statusText = 'बच्चे के फोन से सिग्नल खोज रहे हैं... ($attempt/30)';
         });
         offerData = await _signaling.getOffer(roomCode);
         if (offerData != null && offerData['sdp'] != null) {
@@ -991,7 +963,7 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
       }
 
       setState(() {
-        _statusText = 'सिग्नल मिल गया! कनेक्शन बन रहा है...';
+        _statusText = '✅ बच्चे का सिग्नल मिल गया! लाइव स्क्रीन कनेक्ट हो रही है...';
       });
 
       // 2. Create PeerConnection

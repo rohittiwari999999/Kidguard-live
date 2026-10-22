@@ -416,44 +416,65 @@ export class PeerManager {
     }
   }
 
+  possibleCodes(code: string): string[] {
+    const clean = this.cleanCode(code);
+    const set = new Set<string>([clean]);
+    if (clean.startsWith('kid')) {
+      const num = clean.replace(/^kid/, '');
+      if (num) set.add(num);
+    } else {
+      set.add(`kid${clean}`);
+    }
+    return Array.from(set);
+  }
+
   async startHttpParentWatch(roomCode: string, onStream: (stream: MediaStream) => void) {
     this.stopHttpSignaling();
-    const clean = this.cleanCode(roomCode);
+    const codes = this.possibleCodes(roomCode);
     const rawCode = roomCode.trim().toUpperCase();
 
     const tryConnect = async () => {
       try {
         let offerData: any = null;
 
-        // 1. Try fetching offer from ntfy.sh (primary for cross-device mobile connections)
-        try {
-          const ntfyRes = await fetch(`https://ntfy.sh/kg_signal_${clean}_offer/json?poll=1`);
-          if (ntfyRes.ok) {
-            const text = await ntfyRes.text();
-            const lines = text.trim().split('\n');
-            for (const line of lines.reverse()) {
-              if (!line) continue;
-              try {
-                const parsed = JSON.parse(line);
-                if (parsed.message) {
-                  const inner = JSON.parse(parsed.message);
-                  if (inner.sdp) {
-                    offerData = inner;
-                    break;
+        // 1. Try fetching offer from ntfy.sh (checks all code variants)
+        for (const c of codes) {
+          if (offerData?.sdp) break;
+          try {
+            const ntfyRes = await fetch(`https://ntfy.sh/kg_signal_${c}_offer/json?poll=1`);
+            if (ntfyRes.ok) {
+              const text = await ntfyRes.text();
+              const lines = text.trim().split('\n');
+              for (const line of lines.reverse()) {
+                if (!line) continue;
+                try {
+                  const parsed = JSON.parse(line);
+                  if (parsed.message) {
+                    const inner = JSON.parse(parsed.message);
+                    if (inner.sdp) {
+                      offerData = inner;
+                      break;
+                    }
                   }
-                }
-              } catch {}
+                } catch {}
+              }
             }
+          } catch (e) {
+            console.warn('ntfy poll offer error:', e);
           }
-        } catch (e) {
-          console.warn('ntfy poll offer error:', e);
         }
 
         // 2. Fallback to local server
         if (!offerData || !offerData.sdp) {
-          const localRes = await fetch(`/api/signal/room/${rawCode}/offer`);
-          if (localRes.ok) {
-            offerData = await localRes.json();
+          for (const c of [rawCode, ...codes]) {
+            if (offerData?.sdp) break;
+            try {
+              const localRes = await fetch(`/api/signal/room/${c}/offer`);
+              if (localRes.ok) {
+                const data = await localRes.json();
+                if (data?.sdp) offerData = data;
+              }
+            } catch {}
           }
         }
 
