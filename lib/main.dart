@@ -22,7 +22,7 @@ const String kDefaultSignalingServer = 'https://ais-dev-6snjgczxe5mnz34fbgzs4p-7
 class SignalingService {
   final String baseUrl;
   final HttpClient _client = HttpClient()
-    ..connectionTimeout = const Duration(seconds: 8)
+    ..connectionTimeout = const Duration(seconds: 4)
     ..badCertificateCallback = ((X509Certificate cert, String host, int port) => true);
 
   SignalingService({this.baseUrl = kDefaultSignalingServer});
@@ -46,19 +46,35 @@ class SignalingService {
   Future<bool> sendOffer(String roomCode, String sdp, String type) async {
     final codes = _possibleCodes(roomCode);
     bool ok = false;
-    final payload = jsonEncode({'sdp': sdp, 'type': type, 'timestamp': DateTime.now().millisecondsSinceEpoch});
+    final payloadMap = {'sdp': sdp, 'type': type, 'timestamp': DateTime.now().millisecondsSinceEpoch};
+    final payload = jsonEncode(payloadMap);
 
-    // Primary: ntfy.sh global public pub/sub
     for (final c in codes) {
+      // 1. JSON publish with explicit topic field
+      try {
+        final uri = Uri.parse('https://ntfy.sh');
+        final request = await _client.postUrl(uri);
+        request.headers.contentType = ContentType.json;
+        request.write(jsonEncode({
+          'topic': 'kg_signal_${c}_offer',
+          'message': payload,
+        }));
+        final response = await request.close().timeout(const Duration(seconds: 3));
+        if (response.statusCode == 200) ok = true;
+      } catch (e) {
+        debugPrint('ntfy sendOffer JSON ($c): $e');
+      }
+
+      // 2. Direct topic path publish with raw text
       try {
         final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_offer');
         final request = await _client.postUrl(uri);
-        request.headers.contentType = ContentType.json;
+        request.headers.contentType = ContentType.text;
         request.write(payload);
         final response = await request.close().timeout(const Duration(seconds: 3));
         if (response.statusCode == 200) ok = true;
       } catch (e) {
-        debugPrint('ntfy sendOffer ($c): $e');
+        debugPrint('ntfy sendOffer text ($c): $e');
       }
     }
 
@@ -67,7 +83,6 @@ class SignalingService {
 
   Future<Map<String, dynamic>?> getOffer(String roomCode) async {
     final codes = _possibleCodes(roomCode);
-    // Primary: ntfy.sh
     for (final c in codes) {
       try {
         final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_offer/json?poll=1');
@@ -81,7 +96,8 @@ class SignalingService {
             try {
               final json = jsonDecode(line);
               if (json is Map && json['message'] != null) {
-                final payload = jsonDecode(json['message']);
+                final msgStr = json['message'].toString();
+                final payload = jsonDecode(msgStr);
                 if (payload is Map && payload['sdp'] != null) {
                   return Map<String, dynamic>.from(payload);
                 }
@@ -100,19 +116,30 @@ class SignalingService {
   Future<bool> sendAnswer(String roomCode, String sdp, String type) async {
     final codes = _possibleCodes(roomCode);
     bool ok = false;
-    final payload = jsonEncode({'sdp': sdp, 'type': type, 'timestamp': DateTime.now().millisecondsSinceEpoch});
+    final payloadMap = {'sdp': sdp, 'type': type, 'timestamp': DateTime.now().millisecondsSinceEpoch};
+    final payload = jsonEncode(payloadMap);
 
     for (final c in codes) {
       try {
-        final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_answer');
+        final uri = Uri.parse('https://ntfy.sh');
         final request = await _client.postUrl(uri);
         request.headers.contentType = ContentType.json;
+        request.write(jsonEncode({
+          'topic': 'kg_signal_${c}_answer',
+          'message': payload,
+        }));
+        final response = await request.close().timeout(const Duration(seconds: 3));
+        if (response.statusCode == 200) ok = true;
+      } catch (_) {}
+
+      try {
+        final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_answer');
+        final request = await _client.postUrl(uri);
+        request.headers.contentType = ContentType.text;
         request.write(payload);
         final response = await request.close().timeout(const Duration(seconds: 3));
         if (response.statusCode == 200) ok = true;
-      } catch (e) {
-        debugPrint('ntfy sendAnswer ($c): $e');
-      }
+      } catch (_) {}
     }
 
     return ok;
@@ -168,9 +195,21 @@ class SignalingService {
     for (final c in codes) {
       try {
         final topic = 'kg_signal_${c}_cand_$sender';
-        final uri = Uri.parse('https://ntfy.sh/$topic');
+        final uri = Uri.parse('https://ntfy.sh');
         final request = await _client.postUrl(uri);
         request.headers.contentType = ContentType.json;
+        request.write(jsonEncode({
+          'topic': topic,
+          'message': payload,
+        }));
+        await request.close().timeout(const Duration(seconds: 3));
+      } catch (_) {}
+
+      try {
+        final topic = 'kg_signal_${c}_cand_$sender';
+        final uri = Uri.parse('https://ntfy.sh/$topic');
+        final request = await _client.postUrl(uri);
+        request.headers.contentType = ContentType.text;
         request.write(payload);
         await request.close().timeout(const Duration(seconds: 3));
       } catch (_) {}
@@ -218,13 +257,322 @@ class SignalingService {
 
     return results;
   }
+}
 
-  Future<void> deleteRoom(String roomCode) async {
+// -------------------------------------------------------------
+// LOCAL WI-FI / LAN SIGNALING SERVICE (Zero Internet Required)
+// Ultra-fast peer discovery & signaling for devices on same Wi-Fi
+// -------------------------------------------------------------
+class LocalLanSignaling {
+  HttpServer? _httpServer;
+  RawDatagramSocket? _udpSocket;
+  Timer? _beaconTimer;
+  String? _lanPeerIp;
+  int _lanPeerPort = 8998;
+
+  String cleanCode(String code) {
+    return code.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '').toLowerCase();
+  }
+
+  static Future<List<String>> getLocalIps() async {
+    final List<String> ips = [];
     try {
-      final uri = Uri.parse('$baseUrl/api/signal/room/$roomCode');
-      final request = await _client.deleteUrl(uri);
-      await request.close();
+      final interfaces = await NetworkInterface.list(
+        includeLoopback: false,
+        type: InternetAddressType.IPv4,
+      );
+      for (final iface in interfaces) {
+        for (final addr in iface.addresses) {
+          if (!addr.isLoopback && addr.address.contains('.')) {
+            ips.add(addr.address);
+          }
+        }
+      }
     } catch (_) {}
+    return ips;
+  }
+
+  // 1. CHILD DEVICE: Start Local HTTP Server & UDP Broadcast
+  Future<void> startChild({
+    required String roomCode,
+    required String Function() getOfferSdp,
+    required String Function() getOfferType,
+    required Function(String sdp, String type) onAnswerReceived,
+    required Function(RTCIceCandidate candidate) onCandidateReceived,
+    required List<Map<String, dynamic>> Function() getChildCandidates,
+  }) async {
+    await stop();
+    final clean = cleanCode(roomCode);
+
+    try {
+      _httpServer = await HttpServer.bind(InternetAddress.anyIPv4, 8998);
+    } catch (_) {
+      try {
+        _httpServer = await HttpServer.bind(InternetAddress.anyIPv4, 0);
+      } catch (e) {
+        debugPrint('Local HTTP server bind error: $e');
+      }
+    }
+
+    if (_httpServer != null) {
+      final assignedPort = _httpServer!.port;
+      _lanPeerPort = assignedPort;
+      debugPrint("🚀 [LAN] Child HTTP Server live on port $assignedPort");
+
+      _httpServer!.listen((HttpRequest request) async {
+        request.response.headers.add('Access-Control-Allow-Origin', '*');
+        request.response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        request.response.headers.add('Access-Control-Allow-Headers', 'Content-Type');
+
+        if (request.method == 'OPTIONS') {
+          request.response.statusCode = HttpStatus.ok;
+          await request.response.close();
+          return;
+        }
+
+        final path = request.uri.path;
+        try {
+          if (path == '/offer') {
+            final sdp = getOfferSdp();
+            final type = getOfferType();
+            request.response.headers.contentType = ContentType.json;
+            request.response.write(jsonEncode({
+              'sdp': sdp,
+              'type': type,
+              'code': clean,
+              'timestamp': DateTime.now().millisecondsSinceEpoch,
+            }));
+          } else if (path == '/answer' && request.method == 'POST') {
+            final body = await utf8.decoder.bind(request).join();
+            final data = jsonDecode(body);
+            if (data is Map && data['sdp'] != null) {
+              onAnswerReceived(data['sdp'], data['type'] ?? 'answer');
+            }
+            request.response.statusCode = HttpStatus.ok;
+            request.response.write(jsonEncode({'success': true}));
+          } else if (path == '/candidate' && request.method == 'POST') {
+            final body = await utf8.decoder.bind(request).join();
+            final data = jsonDecode(body);
+            if (data is Map && data['candidate'] != null) {
+              final cand = RTCIceCandidate(
+                data['candidate'],
+                data['sdpMid'],
+                data['sdpMLineIndex'],
+              );
+              onCandidateReceived(cand);
+            }
+            request.response.statusCode = HttpStatus.ok;
+            request.response.write(jsonEncode({'success': true}));
+          } else if (path == '/candidates') {
+            final cands = getChildCandidates();
+            request.response.headers.contentType = ContentType.json;
+            request.response.write(jsonEncode({'candidates': cands}));
+          } else {
+            request.response.statusCode = HttpStatus.notFound;
+          }
+        } catch (e) {
+          debugPrint('LAN request error: $e');
+        }
+        await request.response.close();
+      });
+    }
+
+    // Start UDP Beacon on 255.255.255.255:8999
+    try {
+      _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      _udpSocket?.broadcastEnabled = true;
+
+      _beaconTimer = Timer.periodic(const Duration(milliseconds: 1200), (t) async {
+        final localIps = await getLocalIps();
+        final sdp = getOfferSdp();
+        if (sdp.isEmpty) return;
+
+        final beacon = jsonEncode({
+          'app': 'kidguard',
+          'code': clean,
+          'port': _lanPeerPort,
+          'ips': localIps,
+          'sdp': sdp,
+          'type': getOfferType(),
+          'ts': DateTime.now().millisecondsSinceEpoch,
+        });
+        final bytes = utf8.encode(beacon);
+
+        try {
+          _udpSocket?.send(bytes, InternetAddress('255.255.255.255'), 8999);
+        } catch (_) {}
+      });
+    } catch (e) {
+      debugPrint('LAN UDP Beacon setup error: $e');
+    }
+  }
+
+  // 2. PARENT DEVICE: Discover Child via Local Wi-Fi
+  Future<Map<String, dynamic>?> discoverOnLan(String roomCode) async {
+    final clean = cleanCode(roomCode);
+    final completer = Completer<Map<String, dynamic>?>();
+
+    RawDatagramSocket? listener;
+    Timer? timeoutTimer;
+
+    try {
+      listener = await RawDatagramSocket.bind(
+        InternetAddress.anyIPv4,
+        8999,
+        reuseAddress: true,
+        reusePort: true,
+      );
+      listener.broadcastEnabled = true;
+
+      listener.listen((RawSocketEvent event) {
+        if (event == RawSocketEvent.read) {
+          final dg = listener?.receive();
+          if (dg != null) {
+            try {
+              final str = utf8.decode(dg.data);
+              final json = jsonDecode(str);
+              if (json is Map && json['app'] == 'kidguard') {
+                final c = json['code']?.toString() ?? '';
+                if (c == clean || c.contains(clean) || clean.contains(c)) {
+                  if (json['ips'] != null && json['ips'] is List && (json['ips'] as List).isNotEmpty) {
+                    _lanPeerIp = (json['ips'] as List).first.toString();
+                  } else {
+                    _lanPeerIp = dg.address.address;
+                  }
+                  _lanPeerPort = json['port'] as int? ?? 8998;
+
+                  if (json['sdp'] != null && !completer.isCompleted) {
+                    completer.complete({
+                      'sdp': json['sdp'],
+                      'type': json['type'] ?? 'offer',
+                      'lanIp': _lanPeerIp,
+                      'lanPort': _lanPeerPort,
+                    });
+                  }
+                }
+              }
+            } catch (_) {}
+          }
+        }
+      });
+    } catch (_) {}
+
+    // Subnet probe in parallel (checks nearby local IPs on same Wi-Fi)
+    _probeSubnetForChild(clean).then((res) {
+      if (res != null && !completer.isCompleted) {
+        _lanPeerIp = res['lanIp'];
+        _lanPeerPort = res['lanPort'] ?? 8998;
+        completer.complete(res);
+      }
+    });
+
+    timeoutTimer = Timer(const Duration(milliseconds: 1400), () {
+      if (!completer.isCompleted) {
+        completer.complete(null);
+      }
+      try {
+        listener?.close();
+      } catch (_) {}
+    });
+
+    final res = await completer.future;
+    timeoutTimer.cancel();
+    try {
+      listener?.close();
+    } catch (_) {}
+    return res;
+  }
+
+  Future<Map<String, dynamic>?> _probeSubnetForChild(String cleanCode) async {
+    try {
+      final localIps = await getLocalIps();
+      for (final ip in localIps) {
+        final parts = ip.split('.');
+        if (parts.length != 4) continue;
+        final subnetPrefix = '${parts[0]}.${parts[1]}.${parts[2]}';
+        final myLastOctet = int.tryParse(parts[3]) ?? 0;
+
+        final candidateOctets = <int>[];
+        for (int offset = 1; offset <= 20; offset++) {
+          if (myLastOctet - offset > 1) candidateOctets.add(myLastOctet - offset);
+          if (myLastOctet + offset < 254) candidateOctets.add(myLastOctet + offset);
+        }
+
+        final client = HttpClient()..connectionTimeout = const Duration(milliseconds: 250);
+        for (final octet in candidateOctets) {
+          final targetIp = '$subnetPrefix.$octet';
+          try {
+            final uri = Uri.parse('http://$targetIp:8998/offer');
+            final req = await client.getUrl(uri).timeout(const Duration(milliseconds: 250));
+            final resp = await req.close().timeout(const Duration(milliseconds: 250));
+            if (resp.statusCode == 200) {
+              final body = await resp.transform(utf8.decoder).join();
+              final json = jsonDecode(body);
+              if (json is Map && json['sdp'] != null) {
+                final c = json['code']?.toString() ?? '';
+                if (c.isEmpty || c == cleanCode || c.contains(cleanCode) || cleanCode.contains(c)) {
+                  client.close();
+                  return {
+                    'sdp': json['sdp'],
+                    'type': json['type'] ?? 'offer',
+                    'lanIp': targetIp,
+                    'lanPort': 8998,
+                  };
+                }
+              }
+            }
+          } catch (_) {}
+        }
+        client.close();
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  Future<bool> sendAnswerToLan(String sdp, String type) async {
+    if (_lanPeerIp == null) return false;
+    try {
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
+      final uri = Uri.parse('http://$_lanPeerIp:$_lanPeerPort/answer');
+      final req = await client.postUrl(uri);
+      req.headers.contentType = ContentType.json;
+      req.write(jsonEncode({'sdp': sdp, 'type': type}));
+      final resp = await req.close().timeout(const Duration(seconds: 2));
+      client.close();
+      return resp.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> sendCandidateToLan(RTCIceCandidate candidate) async {
+    if (_lanPeerIp == null) return;
+    try {
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 1);
+      final uri = Uri.parse('http://$_lanPeerIp:$_lanPeerPort/candidate');
+      final req = await client.postUrl(uri);
+      req.headers.contentType = ContentType.json;
+      req.write(jsonEncode({
+        'candidate': candidate.candidate,
+        'sdpMid': candidate.sdpMid,
+        'sdpMLineIndex': candidate.sdpMLineIndex,
+      }));
+      await req.close().timeout(const Duration(seconds: 1));
+      client.close();
+    } catch (_) {}
+  }
+
+  Future<void> stop() async {
+    _beaconTimer?.cancel();
+    _beaconTimer = null;
+    try {
+      _udpSocket?.close();
+    } catch (_) {}
+    _udpSocket = null;
+    try {
+      await _httpServer?.close(force: true);
+    } catch (_) {}
+    _httpServer = null;
   }
 }
 
@@ -352,6 +700,7 @@ class ChildScreenCapture extends StatefulWidget {
 class _ChildScreenCaptureState extends State<ChildScreenCapture> {
   static const MethodChannel _platformChannel = MethodChannel('com.example.kidguard_live/screen_capture');
   final SignalingService _signaling = SignalingService();
+  final LocalLanSignaling _localLan = LocalLanSignaling();
   final TextEditingController _codeController = TextEditingController(text: 'KID-8429');
 
   RTCPeerConnection? _peerConnection;
@@ -362,9 +711,13 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
 
   Timer? _answerPollTimer;
   Timer? _candidatePollTimer;
+  Timer? _offerHeartbeatTimer;
   int _lastCandidateTimestamp = 0;
   bool _isRemoteDescSet = false;
   final List<RTCIceCandidate> _queuedCandidates = [];
+  final List<Map<String, dynamic>> _collectedChildCandidates = [];
+  String? _latestOfferSdp;
+  String? _latestOfferType;
 
   final Map<String, dynamic> _iceServers = {
     'iceServers': [
@@ -404,11 +757,6 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
     );
   }
 
-  // EXACT SEQUENCE FIX (createOffer se pehle addTrack hona zaroori hai):
-  // 1. Pehle createPeerConnection() call karo
-  // 2. Fir getDisplayMedia() se screen stream lo
-  // 3. Fir _peerConnection.addTrack(track, _screenStream!) call karo
-  // 4. Sabse last me createOffer() aur setLocalDescription(offer) call karo aur server par save karo!
   Future<void> _startScreenShare() async {
     final roomCode = _codeController.text.trim().toUpperCase();
     if (roomCode.isEmpty) {
@@ -423,7 +771,6 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         _statusMessage = 'अनुमतियां जांच रहे हैं...';
       });
 
-      // 1. Android 13/14/15/16: Notification & Core Permissions
       try {
         await Permission.notification.request();
         await [Permission.camera, Permission.microphone].request();
@@ -435,7 +782,6 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         _statusMessage = '1/4: WebRTC Peer Connection तैयार हो रहा है...';
       });
 
-      // STEP 1: Pehle createPeerConnection() call karo
       _peerConnection = await createPeerConnection(_iceServers);
 
       _peerConnection!.onIceConnectionState = (RTCIceConnectionState state) {
@@ -462,6 +808,12 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       // Handle ICE Candidates generated on Kid side
       _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
         if (candidate.candidate != null) {
+          _collectedChildCandidates.add({
+            'candidate': candidate.candidate,
+            'sdpMid': candidate.sdpMid,
+            'sdpMLineIndex': candidate.sdpMLineIndex,
+            'timestamp': DateTime.now().millisecondsSinceEpoch,
+          });
           _signaling.sendCandidate(
             roomCode,
             candidate.candidate!,
@@ -476,9 +828,6 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         _statusMessage = '2/4: स्क्रीन शेयर अनुमति मांग रहे हैं... (कृपया "Entire screen" चुनें)';
       });
 
-      // Android 14/15/16 Lifesaver:
-      // First, trigger native prepareScreenCapture to obtain user consent AND start
-      // the mediaProjection Foreground Service BEFORE WebRTC getDisplayMedia runs!
       try {
         final ready = await _platformChannel.invokeMethod('prepareScreenCapture');
         if (ready != true) {
@@ -491,8 +840,6 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         debugPrint('prepareScreenCapture notice: $nativeErr');
       }
 
-      // NOW the Foreground Service of type mediaProjection is ALREADY RUNNING!
-      // getDisplayMedia() will succeed on Android 16 without any SecurityException crash!
       final mediaConstraints = <String, dynamic>{
         'audio': false,
         'video': true,
@@ -514,7 +861,6 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         _statusMessage = '3/4: वीडियो ट्रैक PeerConnection में जोड़ रहे हैं...';
       });
 
-      // STEP 3: Fir _peerConnection.addTrack(track, _localStream!) call karo
       for (final track in stream.getTracks()) {
         await _peerConnection!.addTrack(track, stream);
       }
@@ -523,30 +869,67 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         _statusMessage = '4/4: SDP Offer तैयार कर सर्वर पर भेज रहे हैं...';
       });
 
-      // STEP 4: Sabse last me createOffer() aur setLocalDescription(offer)
       RTCSessionDescription offer = await _peerConnection!.createOffer({
         'offerToReceiveVideo': 0,
         'offerToReceiveAudio': 0,
       });
       await _peerConnection!.setLocalDescription(offer);
+      _latestOfferSdp = offer.sdp;
+      _latestOfferType = offer.type;
 
-      // Activate sharing state and start answer polling immediately (zero UI freeze)
       setState(() {
         _isSharing = true;
         _isRemoteDescSet = false;
         _queuedCandidates.clear();
+        _collectedChildCandidates.clear();
         _statusMessage = '🔴 ब्रॉडकास्ट चालू है! कोड: $roomCode\nमाता-पिता के जुड़ने की प्रतीक्षा...';
       });
 
-      // Poll for Parent's Answer & Candidates immediately
+      // 1. Direct Wi-Fi LAN Signaling (Instant connection on same network)
+      _localLan.startChild(
+        roomCode: roomCode,
+        getOfferSdp: () => _latestOfferSdp ?? offer.sdp ?? '',
+        getOfferType: () => _latestOfferType ?? offer.type ?? 'offer',
+        onAnswerReceived: (sdp, type) async {
+          if (_peerConnection != null && !_isRemoteDescSet) {
+            _isRemoteDescSet = true;
+            await _peerConnection!.setRemoteDescription(RTCSessionDescription(sdp, type));
+            _drainQueuedCandidates();
+            if (mounted) {
+              setState(() {
+                _isParentConnected = true;
+                _statusMessage = '✅ माता-पिता का फोन (Wi-Fi LAN) जुड़ गया!';
+              });
+            }
+          }
+        },
+        onCandidateReceived: (cand) async {
+          if (_isRemoteDescSet) {
+            await _peerConnection?.addCandidate(cand);
+          } else {
+            _queuedCandidates.add(cand);
+          }
+        },
+        getChildCandidates: () => _collectedChildCandidates,
+      );
+
+      // 2. Poll for Parent's Answer on Cloud Relay
       _startPollingForAnswer(roomCode);
 
-      // Upload Offer asynchronously without blocking the UI or polling
+      // 3. Send initial Offer asynchronously
       _signaling.sendOffer(roomCode, offer.sdp!, offer.type!).then((ok) {
         if (mounted && _isSharing) {
           setState(() {
             _statusMessage = '🔴 ब्रॉडकास्ट सक्रिय है! कोड: $roomCode\nमाता-पिता के जुड़ने की प्रतीक्षा...';
           });
+        }
+      });
+
+      // 4. Offer Heartbeat: keep refreshing Offer every 2.5s so parent can connect anytime!
+      _offerHeartbeatTimer?.cancel();
+      _offerHeartbeatTimer = Timer.periodic(const Duration(milliseconds: 2500), (_) {
+        if (_isSharing && !_isParentConnected && _peerConnection != null) {
+          _signaling.sendOffer(roomCode, offer.sdp!, offer.type!);
         }
       });
 
@@ -589,10 +972,8 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         );
 
         debugPrint('Parent answer received! Setting Remote Description...');
-        // 1. Pehle Remote Description set hone ka wait karo
         await _peerConnection!.setRemoteDescription(answer);
 
-        // 2. Ab Parent ke queued & new ICE candidates listen karna start karo
         _drainQueuedCandidates();
         _startListeningToParentIceCandidates(roomCode);
 
@@ -649,6 +1030,11 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
   void _stopScreenShare() async {
     _answerPollTimer?.cancel();
     _candidatePollTimer?.cancel();
+    _offerHeartbeatTimer?.cancel();
+    _offerHeartbeatTimer = null;
+    _localLan.stop();
+    _collectedChildCandidates.clear();
+
     try {
       await _platformChannel.invokeMethod('stopScreenCapture');
     } catch (_) {}
@@ -877,11 +1263,13 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
   final TextEditingController _codeController = TextEditingController(text: 'KID-8429');
   final SignalingService _signaling = SignalingService();
+  final LocalLanSignaling _localLan = LocalLanSignaling();
 
   RTCPeerConnection? _peerConnection;
   bool _isConnecting = false;
   bool _isConnected = false;
   bool _hasRemoteVideo = false;
+  bool _isLanConnection = false;
   String _statusText = 'बच्चे का कोड डालकर कनेक्ट करें।';
   String _iceState = 'None';
   String _videoResolution = '0x0';
@@ -905,7 +1293,7 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     super.initState();
     _remoteRenderer.initialize();
 
-    // Debug Check 2: Resolution listener
+    // Resolution listener
     _remoteRenderer.onResize = () {
       debugPrint("📺 Video Resolution Received: ${_remoteRenderer.videoWidth}x${_remoteRenderer.videoHeight}");
       if (mounted) {
@@ -919,10 +1307,6 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     };
   }
 
-  // EXACT SEQUENCE FIX FOR PARENT SIDE:
-  // 1. Pehle Kid ka offer le kar await _peerConnection.setRemoteDescription(offer) poora hone do
-  // 2. Uske baad hi Kid ke iceCandidates collection ko listen karke addCandidate() me daalo
-  // 3. onTrack me Unified Plan Fallback lagao taaki event.streams empty aane par bhi screen blank na rahe!
   Future<void> _connectToChild() async {
     final roomCode = _codeController.text.trim().toUpperCase();
     if (roomCode.isEmpty) {
@@ -940,18 +1324,34 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     });
 
     try {
-      // 1. Fetch Kid's Offer from Signaling Server (with 30 retries / ~45s window)
       Map<String, dynamic>? offerData;
-      for (int attempt = 1; attempt <= 30; attempt++) {
+      _isLanConnection = false;
+
+      for (int attempt = 1; attempt <= 40; attempt++) {
         if (!mounted || !_isConnecting) return;
         setState(() {
-          _statusText = 'बच्चे के फोन से सिग्नल खोज रहे हैं... ($attempt/30)';
+          _statusText = 'बच्चे के फोन से सिग्नल खोज रहे हैं... ($attempt/40)';
         });
+
+        // 1. Direct Wi-Fi LAN search (Instant <200ms when both phones are on same Wi-Fi)
+        try {
+          final lanOffer = await _localLan.discoverOnLan(roomCode);
+          if (lanOffer != null && lanOffer['sdp'] != null) {
+            offerData = lanOffer;
+            _isLanConnection = true;
+            debugPrint("🎯 [Parent] Discovered Child via Direct Wi-Fi LAN!");
+            break;
+          }
+        } catch (_) {}
+
+        // 2. Cloud Relay search (ntfy.sh)
         offerData = await _signaling.getOffer(roomCode);
         if (offerData != null && offerData['sdp'] != null) {
+          debugPrint("🎯 [Parent] Discovered Child via Cloud Relay!");
           break;
         }
-        await Future.delayed(const Duration(milliseconds: 1500));
+
+        await Future.delayed(const Duration(milliseconds: 1000));
       }
 
       if (offerData == null || offerData['sdp'] == null) {
@@ -963,13 +1363,13 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
       }
 
       setState(() {
-        _statusText = '✅ बच्चे का सिग्नल मिल गया! लाइव स्क्रीन कनेक्ट हो रही है...';
+        _statusText = _isLanConnection
+            ? '⚡ वाई-फाई डायरेक्ट सिग्नल मिल गया! स्क्रीन लोड हो रही है...'
+            : '✅ बच्चे का क्लाउड सिग्नल मिल गया! लाइव स्क्रीन कनेक्ट हो रही है...';
       });
 
-      // 2. Create PeerConnection
       _peerConnection = await createPeerConnection(_iceServers);
 
-      // Debug Check 1: ICE Connection State listener
       _peerConnection!.onIceConnectionState = (RTCIceConnectionState state) {
         debugPrint("📡 ICE Connection State: $state");
         if (mounted) {
@@ -988,8 +1388,6 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
         }
       };
 
-      // FIX 2: UNIFIED PLAN BUG FIX ON PARENT SIDE
-      // Agar event.streams empty aaye toh nayi MediaStream bana kar track bind karo!
       _peerConnection!.onTrack = (RTCTrackEvent event) async {
         debugPrint("🔥 Track received: ${event.track.kind}, Streams count: ${event.streams.length}");
 
@@ -997,7 +1395,6 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
           if (event.streams.isNotEmpty) {
             _remoteRenderer.srcObject = event.streams[0];
           } else {
-            // Fallback: Agar stream empty aaye toh nayi MediaStream bana kar track bind karo
             MediaStream newStream = await createLocalMediaStream('remoteVideoStream');
             newStream.addTrack(event.track);
             _remoteRenderer.srcObject = newStream;
@@ -1013,9 +1410,11 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
         }
       };
 
-      // Send Parent ICE candidates to server
       _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
         if (candidate.candidate != null) {
+          if (_isLanConnection) {
+            _localLan.sendCandidateToLan(candidate);
+          }
           _signaling.sendCandidate(
             roomCode,
             candidate.candidate!,
@@ -1026,7 +1425,6 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
         }
       };
 
-      // FIX 3: TIMING RULE - Pehle Kid ka offer le kar setRemoteDescription poora hone do!
       RTCSessionDescription offer = RTCSessionDescription(
         offerData['sdp'],
         offerData['type'] ?? 'offer',
@@ -1034,14 +1432,15 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
       await _peerConnection!.setRemoteDescription(offer);
       _isRemoteDescSet = true;
 
-      // Create Answer
       RTCSessionDescription answer = await _peerConnection!.createAnswer({});
       await _peerConnection!.setLocalDescription(answer);
 
-      // Send Answer to Server
+      // Send Answer to both LAN (if connected) and Cloud Relay
+      if (_isLanConnection) {
+        _localLan.sendAnswerToLan(answer.sdp!, answer.type!);
+      }
       await _signaling.sendAnswer(roomCode, answer.sdp!, answer.type!);
 
-      // AB Kid ke ICE candidates listen karna start karo
       _startListeningToKidIceCandidates(roomCode);
 
       setState(() {
@@ -1094,6 +1493,7 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
 
   void _disconnect() {
     _candidatePollTimer?.cancel();
+    _localLan.stop();
     try {
       _peerConnection?.close();
     } catch (_) {}

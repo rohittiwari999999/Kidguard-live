@@ -519,10 +519,21 @@ export class PeerManager {
               sender: 'parent',
               timestamp: Date.now(),
             };
-            fetch(`https://ntfy.sh/kg_signal_${clean}_cand_parent`, {
-              method: 'POST',
-              body: JSON.stringify(candPayload),
-            }).catch(() => {});
+            for (const c of codes) {
+              fetch(`https://ntfy.sh/kg_signal_${c}_cand_parent`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'text/plain' },
+                body: JSON.stringify(candPayload),
+              }).catch(() => {});
+              fetch('https://ntfy.sh', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  topic: `kg_signal_${c}_cand_parent`,
+                  message: JSON.stringify(candPayload),
+                }),
+              }).catch(() => {});
+            }
             fetch(`/api/signal/room/${rawCode}/candidate`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -539,10 +550,21 @@ export class PeerManager {
 
         const answerPayload = { sdp: answer.sdp, type: answer.type, timestamp: Date.now() };
 
-        fetch(`https://ntfy.sh/kg_signal_${clean}_answer`, {
-          method: 'POST',
-          body: JSON.stringify(answerPayload),
-        }).catch(() => {});
+        for (const c of codes) {
+          fetch(`https://ntfy.sh/kg_signal_${c}_answer`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain' },
+            body: JSON.stringify(answerPayload),
+          }).catch(() => {});
+          fetch('https://ntfy.sh', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              topic: `kg_signal_${c}_answer`,
+              message: JSON.stringify(answerPayload),
+            }),
+          }).catch(() => {});
+        }
 
         fetch(`/api/signal/room/${rawCode}/answer`, {
           method: 'POST',
