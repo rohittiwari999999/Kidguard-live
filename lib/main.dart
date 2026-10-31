@@ -983,6 +983,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
   bool _isSharing = false;
   String _statusMessage = 'तैयार है। स्क्रीन शेयर शुरू करें।';
   bool _isParentConnected = false;
+  String _parentPin = '1234'; // Security PIN to stop broadcast or change settings
 
   // Live Audio & Remote Touch state
   MediaStream? _micStream;
@@ -1555,6 +1556,81 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
     }
   }
 
+  void _promptPinToStop() {
+    final pinController = TextEditingController();
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF1E293B),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: const Row(
+            children: [
+              Icon(Icons.lock, color: Colors.amberAccent),
+              SizedBox(width: 10),
+              Text('सुरक्षा पिन (PIN Lock)', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'स्क्रीन शेयरिंग बंद करने के लिए माता-पिता का 4-अंकीय पिन दर्ज करें:\n(डिफ़ॉल्ट पिन: 1234)',
+                style: TextStyle(color: Colors.white70, fontSize: 13),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: pinController,
+                keyboardType: TextInputType.number,
+                obscureText: true,
+                maxLength: 4,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 26, letterSpacing: 8, color: Colors.cyanAccent, fontWeight: FontWeight.bold),
+                decoration: InputDecoration(
+                  counterText: '',
+                  hintText: '••••',
+                  hintStyle: const TextStyle(color: Colors.grey, letterSpacing: 8),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('रद्द करें', style: TextStyle(color: Colors.white60)),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.redAccent,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+              onPressed: () {
+                if (pinController.text == _parentPin) {
+                  Navigator.pop(ctx);
+                  _stopScreenShare();
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('✅ पिन सत्यापित: स्क्रीन शेयर बंद हो गया।')),
+                  );
+                } else {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('❌ गलत पिन! केवल माता-पिता ही इसे बंद कर सकते हैं।'),
+                      backgroundColor: Colors.red,
+                    ),
+                  );
+                }
+              },
+              child: const Text('सत्यापित करें व बंद करें'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   void _generateRandomCode() {
     final randomNum = 1000 + (DateTime.now().millisecondsSinceEpoch % 9000);
     setState(() {
@@ -1752,21 +1828,44 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
 
             const SizedBox(height: 20),
 
-            // Action Button
+            // Action Button with PIN Lock protection
             ElevatedButton.icon(
-              icon: Icon(_isSharing ? Icons.stop : Icons.play_arrow, size: 28),
+              icon: Icon(_isSharing ? Icons.lock_outline : Icons.play_arrow, size: 28),
               label: Text(
-                _isSharing ? 'स्क्रीन शेयरिंग बंद करें (Stop)' : 'पूरे मोबाइल की स्क्रीन शेयर शुरू करें',
+                _isSharing ? 'स्क्रीन शेयरिंग बंद करें (पिन आवश्यक)' : 'पूरे मोबाइल की स्क्रीन शेयर शुरू करें',
                 style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
               ),
               style: ElevatedButton.styleFrom(
                 minimumSize: const Size.fromHeight(56),
-                backgroundColor: _isSharing ? Colors.redAccent : Colors.green,
+                backgroundColor: _isSharing ? Colors.redAccent.shade700 : Colors.green,
                 foregroundColor: Colors.white,
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
               ),
-              onPressed: _isSharing ? _stopScreenShare : _startScreenShare,
+              onPressed: _isSharing ? _promptPinToStop : _startScreenShare,
             ),
+
+            if (_isSharing) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.black45,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.amberAccent.withOpacity(0.5)),
+                ),
+                child: const Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.lock, size: 16, color: Colors.amberAccent),
+                    SizedBox(width: 8),
+                    Text(
+                      '🔒 पिन लॉक सुरक्षा सक्रिय (डिफ़ॉल्ट पिन: 1234) — बिना पिन ऐप बंद नहीं होगा',
+                      style: TextStyle(fontSize: 11, color: Colors.amberAccent, fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ],
         ),
       ),

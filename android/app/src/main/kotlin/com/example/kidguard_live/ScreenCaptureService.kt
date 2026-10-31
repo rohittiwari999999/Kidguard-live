@@ -98,25 +98,16 @@ class ScreenCaptureService : Service() {
 
     private fun startForegroundWithNotification() {
         try {
-            val stopIntent = Intent(this, ScreenCaptureService::class.java).apply {
-                action = ACTION_STOP
-            }
-            val stopPendingIntent = PendingIntent.getService(
-                this,
-                0,
-                stopIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-
             val safeIcon = applicationInfo.icon.takeIf { it != 0 } ?: android.R.drawable.ic_dialog_info
 
+            // Locked non-dismissible notification without a stop button
             val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("KidGuard Live: स्क्रीन लाइव प्रसारित हो रही है")
-                .setContentText("माता-पिता के फोन पर लाइव दिख रही है (सक्रिय बैकग्राउंड सेवा)")
+                .setContentTitle("KidGuard Live: स्क्रीन सुरक्षित निगरानी सक्रिय है")
+                .setContentText("माता-पिता के फोन से सुरक्षित लाइव कनेक्टेड (पिन-लॉक सुरक्षित)")
                 .setSmallIcon(safeIcon)
                 .setOngoing(true)
+                .setAutoCancel(false)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
-                .addAction(android.R.drawable.ic_media_pause, "स्क्रीन शेयर रोकें", stopPendingIntent)
                 .build()
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
