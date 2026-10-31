@@ -20,7 +20,13 @@ import {
   CheckCircle, 
   Sparkles,
   Smartphone,
-  QrCode
+  QrCode,
+  MousePointerClick,
+  ArrowLeft,
+  Home,
+  Layers,
+  ArrowUp,
+  ArrowDown
 } from 'lucide-react';
 import { PeerManager } from '../services/peerManager';
 import { QRScannerModal } from './QRScannerModal';
@@ -55,6 +61,10 @@ export const ParentView: React.FC<ParentViewProps> = ({
   const [zoomLevel, setZoomLevel] = useState<1 | 1.5 | 2>(1);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const videoContainerRef = useRef<HTMLDivElement | null>(null);
+
+  // Remote Touch & Pointer Feedback
+  const [isRemoteTouchOn, setIsRemoteTouchOn] = useState(false);
+  const [touchFeedbackPos, setTouchFeedbackPos] = useState<{ x: number; y: number } | null>(null);
 
   // Recording
   const [isRecording, setIsRecording] = useState(false);
@@ -349,6 +359,82 @@ export const ParentView: React.FC<ParentViewProps> = ({
     return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   };
 
+  // Toggle Live Audio
+  const handleToggleAudio = () => {
+    const nextMuted = !isAudioMuted;
+    setIsAudioMuted(nextMuted);
+    if (videoRef.current) {
+      videoRef.current.muted = nextMuted;
+      if (!nextMuted) {
+        videoRef.current.play().catch(() => {});
+      }
+    }
+    const code = connectedRoom || inputCode;
+    const payload = { enabled: !nextMuted };
+    peerManager.sendMessage({
+      type: 'TOGGLE_AUDIO',
+      payload,
+      timestamp: Date.now(),
+    });
+    fetch(`/api/signal/room/${code}/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'TOGGLE_AUDIO', payload }),
+    }).catch(() => {});
+  };
+
+  // Toggle Remote Touch
+  const handleToggleRemoteTouch = () => {
+    setIsRemoteTouchOn((prev) => !prev);
+  };
+
+  // Handle click on video stream for Remote Touch
+  const handleVideoPointerClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isRemoteTouchOn) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const normX = Math.max(0, Math.min(1, x / rect.width));
+    const normY = Math.max(0, Math.min(1, y / rect.height));
+
+    setTouchFeedbackPos({ x, y });
+    setTimeout(() => setTouchFeedbackPos(null), 600);
+
+    const code = connectedRoom || inputCode;
+    const payload = {
+      action: 'TAP',
+      x: normX,
+      y: normY,
+    };
+
+    peerManager.sendMessage({
+      type: 'REMOTE_TOUCH',
+      payload,
+      timestamp: Date.now(),
+    });
+    fetch(`/api/signal/room/${code}/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'REMOTE_TOUCH', payload }),
+    }).catch(() => {});
+  };
+
+  // Send Remote Navigation action
+  const sendRemoteNav = (key: string) => {
+    const code = connectedRoom || inputCode;
+    const payload = { key };
+    peerManager.sendMessage({
+      type: 'REMOTE_NAV',
+      payload,
+      timestamp: Date.now(),
+    });
+    fetch(`/api/signal/room/${code}/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'REMOTE_NAV', payload }),
+    }).catch(() => {});
+  };
+
   return (
     <div className="max-w-4xl mx-auto px-4 py-6">
       {/* Header & Connection Bar */}
@@ -410,11 +496,59 @@ export const ParentView: React.FC<ParentViewProps> = ({
           </div>
         </div>
 
+        {/* Remote Touch & Live Audio Bar (ONLY when Connected) */}
+        {hasStream && connectionStatus === 'connected' && (
+          <div className="mt-4 p-3 bg-slate-950/80 rounded-2xl border border-cyan-500/30 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-lg">
+            <div className="flex items-center gap-2 w-full sm:w-auto">
+              <button
+                onClick={handleToggleRemoteTouch}
+                className={`flex-1 sm:flex-none px-4 py-2.5 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer shadow-md ${
+                  isRemoteTouchOn
+                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-600/30 ring-2 ring-emerald-400'
+                    : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700'
+                }`}
+              >
+                <MousePointerClick className="w-4 h-4 text-emerald-400" />
+                <span>{isRemoteTouchOn ? '👆 रिमोट टच: चालू' : '👆 रिमोट टच: बंद'}</span>
+              </button>
+
+              <button
+                onClick={handleToggleAudio}
+                className={`flex-1 sm:flex-none px-4 py-2.5 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer shadow-md ${
+                  !isAudioMuted
+                    ? 'bg-teal-600 hover:bg-teal-500 text-white shadow-teal-600/30 ring-2 ring-teal-400'
+                    : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700'
+                }`}
+              >
+                {!isAudioMuted ? <Volume2 className="w-4 h-4 text-teal-300 animate-pulse" /> : <VolumeX className="w-4 h-4 text-rose-400" />}
+                <span>{!isAudioMuted ? '🔊 लाइव ऑडियो: चालू' : '🔇 लाइव ऑडियो: बंद'}</span>
+              </button>
+            </div>
+
+            {/* Status notice */}
+            <div className="text-[11px] font-semibold text-slate-300 flex items-center gap-2">
+              {!isAudioMuted && (
+                <span className="flex items-center gap-1 text-teal-400 bg-teal-500/10 px-2 py-1 rounded-lg border border-teal-500/20">
+                  <span className="w-2 h-2 rounded-full bg-teal-400 animate-ping" />
+                  बच्चे के फोन का माइक लाइव सुन रहे हैं
+                </span>
+              )}
+              {isRemoteTouchOn && (
+                <span className="text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded-lg border border-emerald-500/20">
+                  स्क्रीन पर जहां क्लिक करेंगे वही टच बच्चे के फोन पर जाएगा
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Live Video Feed Container */}
-        <div className="mt-5">
+        <div className="mt-4">
           <div
             ref={videoContainerRef}
-            className="relative rounded-2xl overflow-hidden bg-black aspect-video max-h-[520px] w-full flex items-center justify-center border border-slate-800 shadow-2xl group"
+            className={`relative rounded-2xl overflow-hidden bg-black aspect-video max-h-[520px] w-full flex items-center justify-center border shadow-2xl group ${
+              isRemoteTouchOn ? 'border-emerald-500/60 ring-2 ring-emerald-500/20' : 'border-slate-800'
+            }`}
           >
             {/* The Live Video Element */}
             <video
@@ -430,6 +564,22 @@ export const ParentView: React.FC<ParentViewProps> = ({
                 zoomLevel === 1.5 ? 'scale-150' : zoomLevel === 2 ? 'scale-200' : 'scale-100'
               }`}
             />
+
+            {/* Remote Touch Interactive Surface */}
+            {isRemoteTouchOn && hasStream && (
+              <div
+                onClick={handleVideoPointerClick}
+                className="absolute inset-0 z-10 cursor-crosshair"
+              />
+            )}
+
+            {/* Touch Feedback Ripple */}
+            {touchFeedbackPos && (
+              <div
+                style={{ left: touchFeedbackPos.x - 20, top: touchFeedbackPos.y - 20 }}
+                className="absolute z-20 w-10 h-10 rounded-full border-2 border-white bg-cyan-400/50 shadow-lg shadow-cyan-400/80 animate-ping pointer-events-none"
+              />
+            )}
 
             {/* Offline or Waiting State */}
             {!hasStream && (
@@ -576,6 +726,48 @@ export const ParentView: React.FC<ParentViewProps> = ({
             )}
           </div>
         </div>
+
+        {/* Remote Navigation Control Bar (ONLY when Connected & Remote Touch is ON) */}
+        {hasStream && connectionStatus === 'connected' && isRemoteTouchOn && (
+          <div className="mt-3 p-2 bg-slate-950/90 rounded-2xl border border-emerald-500/30 flex flex-wrap items-center justify-center gap-2 shadow-md">
+            <span className="text-xs text-emerald-400 font-bold mr-2 hidden sm:inline">👆 रिमोट नेविगेशन:</span>
+            <button
+              onClick={() => sendRemoteNav('BACK')}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold flex items-center gap-1.5 transition active:scale-95 border border-slate-700 cursor-pointer"
+            >
+              <ArrowLeft className="w-3.5 h-3.5 text-cyan-400" />
+              <span>पीछे (Back)</span>
+            </button>
+            <button
+              onClick={() => sendRemoteNav('HOME')}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold flex items-center gap-1.5 transition active:scale-95 border border-slate-700 cursor-pointer"
+            >
+              <Home className="w-3.5 h-3.5 text-amber-400" />
+              <span>होम (Home)</span>
+            </button>
+            <button
+              onClick={() => sendRemoteNav('RECENTS')}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold flex items-center gap-1.5 transition active:scale-95 border border-slate-700 cursor-pointer"
+            >
+              <Layers className="w-3.5 h-3.5 text-purple-400" />
+              <span>हाल के ऐप्स (Recents)</span>
+            </button>
+            <button
+              onClick={() => sendRemoteNav('SCROLL_UP')}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold flex items-center gap-1.5 transition active:scale-95 border border-slate-700 cursor-pointer"
+            >
+              <ArrowUp className="w-3.5 h-3.5 text-emerald-400" />
+              <span>ऊपर स्क्रॉल</span>
+            </button>
+            <button
+              onClick={() => sendRemoteNav('SCROLL_DOWN')}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold flex items-center gap-1.5 transition active:scale-95 border border-slate-700 cursor-pointer"
+            >
+              <ArrowDown className="w-3.5 h-3.5 text-emerald-400" />
+              <span>नीचे स्क्रॉल</span>
+            </button>
+          </div>
+        )}
 
         {/* Quick Safety Buzzer Presets Bar */}
         <div className="mt-4 p-3 bg-slate-950/50 rounded-2xl border border-slate-800/80 flex flex-wrap items-center justify-between gap-3">

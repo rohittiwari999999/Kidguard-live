@@ -11,6 +11,7 @@ interface RoomSignal {
   answer?: { sdp: string; type: string; timestamp: number };
   kidCandidates: Array<{ candidate: string; sdpMid?: string; sdpMLineIndex?: number; timestamp: number }>;
   parentCandidates: Array<{ candidate: string; sdpMid?: string; sdpMLineIndex?: number; timestamp: number }>;
+  actions: Array<{ action: string; payload?: any; timestamp: number }>;
   updatedAt: number;
 }
 
@@ -22,6 +23,7 @@ function getOrCreateRoom(code: string): RoomSignal {
     rooms.set(normalized, {
       kidCandidates: [],
       parentCandidates: [],
+      actions: [],
       updatedAt: Date.now(),
     });
   }
@@ -135,7 +137,51 @@ async function startServer() {
     res.json({ success: true, count: sender === 'parent' ? room.parentCandidates.length : room.kidCandidates.length });
   });
 
-  // 6. Get ICE Candidates (Kid asks for parent's, Parent asks for kid's)
+  // 6. Reset Room (for seamless reconnect without restarting child broadcast)
+  app.post('/api/signal/room/:code/reset', (req: Request, res: Response) => {
+    const normalized = req.params.code.trim().toUpperCase();
+    const room = rooms.get(normalized);
+    if (room) {
+      room.answer = undefined;
+      room.kidCandidates = [];
+      room.parentCandidates = [];
+      room.updatedAt = Date.now();
+    }
+    console.log(`[Signal] Room reset for reconnection: ${normalized}`);
+    res.json({ success: true });
+  });
+
+  // Post Action (Remote touch, audio toggle, navigation, buzzer from Parent)
+  app.post('/api/signal/room/:code/action', (req: Request, res: Response) => {
+    const room = getOrCreateRoom(req.params.code);
+    const { action, payload } = req.body;
+    if (!action) {
+      res.status(400).json({ error: 'Missing action' });
+      return;
+    }
+    const item = { action, payload, timestamp: Date.now() };
+    room.actions.push(item);
+    if (room.actions.length > 50) {
+      room.actions = room.actions.slice(-50);
+    }
+    room.updatedAt = Date.now();
+    res.json({ success: true });
+  });
+
+  // Get Actions (Child polls for actions or parents checks)
+  app.get('/api/signal/room/:code/actions', (req: Request, res: Response) => {
+    const normalized = req.params.code.trim().toUpperCase();
+    const room = rooms.get(normalized);
+    if (!room) {
+      res.json({ actions: [] });
+      return;
+    }
+    const since = req.query.since ? parseInt(req.query.since as string, 10) : 0;
+    const actions = room.actions.filter((a) => a.timestamp > since);
+    res.json({ actions });
+  });
+
+  // 7. Get ICE Candidates (Kid asks for parent's, Parent asks for kid's)
   app.get('/api/signal/room/:code/candidates', (req: Request, res: Response) => {
     const normalized = req.params.code.trim().toUpperCase();
     const room = rooms.get(normalized);

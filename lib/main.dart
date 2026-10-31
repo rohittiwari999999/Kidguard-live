@@ -81,7 +81,7 @@ class SignalingService {
     return ok;
   }
 
-  Future<Map<String, dynamic>?> getOffer(String roomCode) async {
+  Future<Map<String, dynamic>?> getOffer(String roomCode, {int minTimestamp = 0}) async {
     final codes = _possibleCodes(roomCode);
     for (final c in codes) {
       try {
@@ -99,7 +99,10 @@ class SignalingService {
                 final msgStr = json['message'].toString();
                 final payload = jsonDecode(msgStr);
                 if (payload is Map && payload['sdp'] != null) {
-                  return Map<String, dynamic>.from(payload);
+                  final ts = payload['timestamp'] as int? ?? 0;
+                  if (ts >= minTimestamp) {
+                    return Map<String, dynamic>.from(payload);
+                  }
                 }
               }
             } catch (_) {}
@@ -110,6 +113,96 @@ class SignalingService {
       }
     }
 
+    return null;
+  }
+
+  Future<void> requestFreshOffer(String roomCode, int reqTimestamp) async {
+    final codes = _possibleCodes(roomCode);
+    final payload = jsonEncode({'request': 'offer', 'timestamp': reqTimestamp});
+    for (final c in codes) {
+      try {
+        final uri = Uri.parse('https://ntfy.sh');
+        final request = await _client.postUrl(uri);
+        request.headers.contentType = ContentType.json;
+        request.write(jsonEncode({
+          'topic': 'kg_signal_${c}_req',
+          'message': payload,
+        }));
+        await request.close().timeout(const Duration(seconds: 2));
+      } catch (_) {}
+    }
+  }
+
+  Future<int?> getLatestRequestTimestamp(String roomCode) async {
+    final codes = _possibleCodes(roomCode);
+    for (final c in codes) {
+      try {
+        final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_req/json?poll=1');
+        final request = await _client.getUrl(uri);
+        final response = await request.close().timeout(const Duration(seconds: 2));
+        if (response.statusCode == 200) {
+          final body = await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 2));
+          final lines = body.trim().split('\n');
+          for (final line in lines.reversed) {
+            if (line.trim().isEmpty) continue;
+            try {
+              final json = jsonDecode(line);
+              if (json is Map && json['message'] != null) {
+                final payload = jsonDecode(json['message']);
+                if (payload is Map && payload['timestamp'] != null) {
+                  return payload['timestamp'] as int;
+                }
+              }
+            } catch (_) {}
+          }
+        }
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  Future<void> sendDisconnect(String roomCode) async {
+    final codes = _possibleCodes(roomCode);
+    final payload = jsonEncode({'event': 'disconnect', 'timestamp': DateTime.now().millisecondsSinceEpoch});
+    for (final c in codes) {
+      try {
+        final uri = Uri.parse('https://ntfy.sh');
+        final request = await _client.postUrl(uri);
+        request.headers.contentType = ContentType.json;
+        request.write(jsonEncode({
+          'topic': 'kg_signal_${c}_disconnect',
+          'message': payload,
+        }));
+        await request.close().timeout(const Duration(seconds: 2));
+      } catch (_) {}
+    }
+  }
+
+  Future<int?> getLatestDisconnectTimestamp(String roomCode) async {
+    final codes = _possibleCodes(roomCode);
+    for (final c in codes) {
+      try {
+        final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_disconnect/json?poll=1');
+        final request = await _client.getUrl(uri);
+        final response = await request.close().timeout(const Duration(seconds: 2));
+        if (response.statusCode == 200) {
+          final body = await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 2));
+          final lines = body.trim().split('\n');
+          for (final line in lines.reversed) {
+            if (line.trim().isEmpty) continue;
+            try {
+              final json = jsonDecode(line);
+              if (json is Map && json['message'] != null) {
+                final payload = jsonDecode(json['message']);
+                if (payload is Map && payload['timestamp'] != null) {
+                  return payload['timestamp'] as int;
+                }
+              }
+            } catch (_) {}
+          }
+        }
+      } catch (_) {}
+    }
     return null;
   }
 
@@ -257,6 +350,96 @@ class SignalingService {
 
     return results;
   }
+
+  Future<bool> sendAction(String roomCode, Map<String, dynamic> actionData) async {
+    final codes = _possibleCodes(roomCode);
+    final payload = jsonEncode({
+      ...actionData,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+    });
+    bool ok = false;
+    for (final c in codes) {
+      try {
+        final uri = Uri.parse('https://ntfy.sh');
+        final request = await _client.postUrl(uri);
+        request.headers.contentType = ContentType.json;
+        request.write(jsonEncode({
+          'topic': 'kg_signal_${c}_action',
+          'message': payload,
+        }));
+        await request.close().timeout(const Duration(seconds: 2));
+        ok = true;
+      } catch (_) {}
+
+      try {
+        final uri = Uri.parse('$baseUrl/api/signal/room/$c/action');
+        final request = await _client.postUrl(uri);
+        request.headers.contentType = ContentType.json;
+        request.write(jsonEncode({
+          'action': actionData['type'] ?? 'REMOTE_ACTION',
+          'payload': actionData,
+        }));
+        await request.close().timeout(const Duration(seconds: 2));
+        ok = true;
+      } catch (_) {}
+    }
+    return ok;
+  }
+
+  Future<List<Map<String, dynamic>>> getActions(String roomCode, int sinceTimestamp) async {
+    final List<Map<String, dynamic>> actions = [];
+    final codes = _possibleCodes(roomCode);
+    for (final c in codes) {
+      // 1. Try local server endpoint first if reachable
+      try {
+        final uri = Uri.parse('$baseUrl/api/signal/room/$c/actions?since=$sinceTimestamp');
+        final request = await _client.getUrl(uri);
+        final response = await request.close().timeout(const Duration(seconds: 2));
+        if (response.statusCode == 200) {
+          final body = await response.transform(utf8.decoder).join();
+          final json = jsonDecode(body);
+          if (json is Map && json['actions'] is List) {
+            for (final a in json['actions']) {
+              if (a is Map && a['payload'] is Map) {
+                actions.add(Map<String, dynamic>.from(a['payload']));
+              }
+            }
+          }
+        }
+      } catch (_) {}
+
+      if (actions.isNotEmpty) return actions;
+
+      // 2. Poll ntfy action topic
+      try {
+        final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_action/json?poll=1');
+        final request = await _client.getUrl(uri);
+        final response = await request.close().timeout(const Duration(seconds: 2));
+        if (response.statusCode == 200) {
+          final body = await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 2));
+          final lines = body.trim().split('\n');
+          for (final line in lines) {
+            if (line.trim().isEmpty) continue;
+            try {
+              final json = jsonDecode(line);
+              if (json is Map && json['message'] != null) {
+                final payload = jsonDecode(json['message']);
+                if (payload is Map) {
+                  final ts = payload['timestamp'] as int? ?? 0;
+                  if (ts > sinceTimestamp) {
+                    actions.add(Map<String, dynamic>.from(payload));
+                  }
+                }
+              }
+            } catch (_) {}
+          }
+        }
+      } catch (_) {}
+
+      if (actions.isNotEmpty) break;
+    }
+    return actions;
+  }
 }
 
 // -------------------------------------------------------------
@@ -297,9 +480,12 @@ class LocalLanSignaling {
     required String roomCode,
     required String Function() getOfferSdp,
     required String Function() getOfferType,
+    required Future<Map<String, dynamic>> Function() onRequestFreshOffer,
+    required Function() onParentDisconnected,
     required Function(String sdp, String type) onAnswerReceived,
     required Function(RTCIceCandidate candidate) onCandidateReceived,
     required List<Map<String, dynamic>> Function() getChildCandidates,
+    Function(Map<String, dynamic> action)? onActionReceived,
   }) async {
     await stop();
     final clean = cleanCode(roomCode);
@@ -333,8 +519,17 @@ class LocalLanSignaling {
         final path = request.uri.path;
         try {
           if (path == '/offer') {
-            final sdp = getOfferSdp();
-            final type = getOfferType();
+            final isRefresh = request.uri.queryParameters['refresh'] == '1' || request.method == 'POST';
+            String sdp;
+            String type;
+            if (isRefresh) {
+              final freshData = await onRequestFreshOffer();
+              sdp = freshData['sdp'] ?? '';
+              type = freshData['type'] ?? 'offer';
+            } else {
+              sdp = getOfferSdp();
+              type = getOfferType();
+            }
             request.response.headers.contentType = ContentType.json;
             request.response.write(jsonEncode({
               'sdp': sdp,
@@ -342,6 +537,19 @@ class LocalLanSignaling {
               'code': clean,
               'timestamp': DateTime.now().millisecondsSinceEpoch,
             }));
+          } else if (path == '/request-offer') {
+            final freshData = await onRequestFreshOffer();
+            request.response.headers.contentType = ContentType.json;
+            request.response.write(jsonEncode({
+              'sdp': freshData['sdp'] ?? '',
+              'type': freshData['type'] ?? 'offer',
+              'code': clean,
+              'timestamp': DateTime.now().millisecondsSinceEpoch,
+            }));
+          } else if (path == '/disconnect') {
+            onParentDisconnected();
+            request.response.statusCode = HttpStatus.ok;
+            request.response.write(jsonEncode({'success': true}));
           } else if (path == '/answer' && request.method == 'POST') {
             final body = await utf8.decoder.bind(request).join();
             final data = jsonDecode(body);
@@ -367,6 +575,14 @@ class LocalLanSignaling {
             final cands = getChildCandidates();
             request.response.headers.contentType = ContentType.json;
             request.response.write(jsonEncode({'candidates': cands}));
+          } else if (path == '/action' && request.method == 'POST') {
+            final body = await utf8.decoder.bind(request).join();
+            final data = jsonDecode(body);
+            if (data is Map && onActionReceived != null) {
+              onActionReceived(Map<String, dynamic>.from(data));
+            }
+            request.response.statusCode = HttpStatus.ok;
+            request.response.write(jsonEncode({'success': true}));
           } else {
             request.response.statusCode = HttpStatus.notFound;
           }
@@ -408,7 +624,7 @@ class LocalLanSignaling {
   }
 
   // 2. PARENT DEVICE: Discover Child via Local Wi-Fi
-  Future<Map<String, dynamic>?> discoverOnLan(String roomCode) async {
+  Future<Map<String, dynamic>?> discoverOnLan(String roomCode, {bool requestFresh = false}) async {
     final clean = cleanCode(roomCode);
     final completer = Completer<Map<String, dynamic>?>();
 
@@ -441,7 +657,13 @@ class LocalLanSignaling {
                   }
                   _lanPeerPort = json['port'] as int? ?? 8998;
 
-                  if (json['sdp'] != null && !completer.isCompleted) {
+                  if (requestFresh) {
+                    requestFreshOfferFromLan().then((fresh) {
+                      if (fresh != null && !completer.isCompleted) {
+                        completer.complete(fresh);
+                      }
+                    });
+                  } else if (json['sdp'] != null && !completer.isCompleted) {
                     completer.complete({
                       'sdp': json['sdp'],
                       'type': json['type'] ?? 'offer',
@@ -458,7 +680,7 @@ class LocalLanSignaling {
     } catch (_) {}
 
     // Subnet probe in parallel (checks nearby local IPs on same Wi-Fi)
-    _probeSubnetForChild(clean).then((res) {
+    _probeSubnetForChild(clean, requestFresh: requestFresh).then((res) {
       if (res != null && !completer.isCompleted) {
         _lanPeerIp = res['lanIp'];
         _lanPeerPort = res['lanPort'] ?? 8998;
@@ -483,7 +705,7 @@ class LocalLanSignaling {
     return res;
   }
 
-  Future<Map<String, dynamic>?> _probeSubnetForChild(String cleanCode) async {
+  Future<Map<String, dynamic>?> _probeSubnetForChild(String cleanCode, {bool requestFresh = false}) async {
     try {
       final localIps = await getLocalIps();
       for (final ip in localIps) {
@@ -502,9 +724,10 @@ class LocalLanSignaling {
         for (final octet in candidateOctets) {
           final targetIp = '$subnetPrefix.$octet';
           try {
-            final uri = Uri.parse('http://$targetIp:8998/offer');
-            final req = await client.getUrl(uri).timeout(const Duration(milliseconds: 250));
-            final resp = await req.close().timeout(const Duration(milliseconds: 250));
+            final path = requestFresh ? '/offer?refresh=1' : '/offer';
+            final uri = Uri.parse('http://$targetIp:8998$path');
+            final req = await client.getUrl(uri).timeout(const Duration(milliseconds: 300));
+            final resp = await req.close().timeout(const Duration(milliseconds: 300));
             if (resp.statusCode == 200) {
               final body = await resp.transform(utf8.decoder).join();
               final json = jsonDecode(body);
@@ -527,6 +750,42 @@ class LocalLanSignaling {
       }
     } catch (_) {}
     return null;
+  }
+
+  Future<Map<String, dynamic>?> requestFreshOfferFromLan() async {
+    if (_lanPeerIp == null) return null;
+    try {
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
+      final uri = Uri.parse('http://$_lanPeerIp:$_lanPeerPort/offer?refresh=1');
+      final req = await client.getUrl(uri);
+      final resp = await req.close().timeout(const Duration(seconds: 2));
+      if (resp.statusCode == 200) {
+        final body = await resp.transform(utf8.decoder).join();
+        final json = jsonDecode(body);
+        client.close();
+        if (json is Map && json['sdp'] != null) {
+          return {
+            'sdp': json['sdp'],
+            'type': json['type'] ?? 'offer',
+            'lanIp': _lanPeerIp,
+            'lanPort': _lanPeerPort,
+          };
+        }
+      }
+      client.close();
+    } catch (_) {}
+    return null;
+  }
+
+  Future<void> sendDisconnectToLan() async {
+    if (_lanPeerIp == null) return;
+    try {
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 1);
+      final uri = Uri.parse('http://$_lanPeerIp:$_lanPeerPort/disconnect');
+      final req = await client.postUrl(uri);
+      await req.close().timeout(const Duration(seconds: 1));
+      client.close();
+    } catch (_) {}
   }
 
   Future<bool> sendAnswerToLan(String sdp, String type) async {
@@ -560,6 +819,22 @@ class LocalLanSignaling {
       await req.close().timeout(const Duration(seconds: 1));
       client.close();
     } catch (_) {}
+  }
+
+  Future<bool> sendActionToLan(Map<String, dynamic> actionData) async {
+    if (_lanPeerIp == null) return false;
+    try {
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 1);
+      final uri = Uri.parse('http://$_lanPeerIp:$_lanPeerPort/action');
+      final req = await client.postUrl(uri);
+      req.headers.contentType = ContentType.json;
+      req.write(jsonEncode(actionData));
+      final resp = await req.close().timeout(const Duration(seconds: 1));
+      client.close();
+      return resp.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> stop() async {
@@ -709,10 +984,24 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
   String _statusMessage = 'तैयार है। स्क्रीन शेयर शुरू करें।';
   bool _isParentConnected = false;
 
+  // Live Audio & Remote Touch state
+  MediaStream? _micStream;
+  MediaStreamTrack? _micAudioTrack;
+  bool _isMicActive = true;
+  RTCDataChannel? _childDataChannel;
+  Offset? _lastRemoteTouchPoint;
+  String? _remoteActionFeedback;
+  Timer? _actionFeedbackTimer;
+  Timer? _actionPollTimer;
+  int _lastActionTimestamp = 0;
+
   Timer? _answerPollTimer;
   Timer? _candidatePollTimer;
   Timer? _offerHeartbeatTimer;
+  Timer? _reconnectListenTimer;
   int _lastCandidateTimestamp = 0;
+  int _lastHandledReqTimestamp = 0;
+  int _lastHandledDisconnectTimestamp = 0;
   bool _isRemoteDescSet = false;
   final List<RTCIceCandidate> _queuedCandidates = [];
   final List<Map<String, dynamic>> _collectedChildCandidates = [];
@@ -732,6 +1021,70 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
   void initState() {
     super.initState();
     _initForegroundTask();
+  }
+
+  void _handleIncomingRemoteAction(String rawJson) {
+    try {
+      final map = jsonDecode(rawJson);
+      if (map is! Map) return;
+      final type = map['type'] as String? ?? map['action'] as String? ?? '';
+
+      if (type == 'TOGGLE_AUDIO') {
+        final enabled = map['enabled'] as bool? ?? true;
+        setState(() {
+          _isMicActive = enabled;
+          _remoteActionFeedback = enabled ? '🎙️ माता-पिता ने ऑडियो चालू किया (माइक लाइव)' : '🔇 माता-पिता ने ऑडियो म्यूट किया';
+        });
+        _micAudioTrack?.enabled = enabled;
+        _resetFeedbackTimer();
+      } else if (type == 'REMOTE_TOUCH') {
+        final x = (map['x'] as num?)?.toDouble() ?? 0.5;
+        final y = (map['y'] as num?)?.toDouble() ?? 0.5;
+        HapticFeedback.lightImpact();
+        setState(() {
+          _lastRemoteTouchPoint = Offset(x, y);
+          _remoteActionFeedback = '👆 माता-पिता का रिमोट टच: ${(x * 100).toStringAsFixed(0)}%, ${(y * 100).toStringAsFixed(0)}%';
+        });
+        _resetFeedbackTimer();
+      } else if (type == 'REMOTE_NAV') {
+        final key = map['key'] as String? ?? map['action'] as String? ?? '';
+        HapticFeedback.mediumImpact();
+        setState(() {
+          _remoteActionFeedback = '👆 रिमोट नेविगेशन: $key';
+        });
+        _resetFeedbackTimer();
+      }
+    } catch (e) {
+      debugPrint("Remote action parse error: $e");
+    }
+  }
+
+  void _resetFeedbackTimer() {
+    _actionFeedbackTimer?.cancel();
+    _actionFeedbackTimer = Timer(const Duration(seconds: 4), () {
+      if (mounted) {
+        setState(() {
+          _lastRemoteTouchPoint = null;
+          _remoteActionFeedback = null;
+        });
+      }
+    });
+  }
+
+  void _startPollingForActions(String roomCode) {
+    _actionPollTimer?.cancel();
+    _lastActionTimestamp = DateTime.now().millisecondsSinceEpoch;
+    _actionPollTimer = Timer.periodic(const Duration(milliseconds: 1000), (_) async {
+      if (!_isSharing) return;
+      final actions = await _signaling.getActions(roomCode, _lastActionTimestamp);
+      for (final a in actions) {
+        final ts = a['timestamp'] as int? ?? 0;
+        if (ts > _lastActionTimestamp) {
+          _lastActionTimestamp = ts;
+          _handleIncomingRemoteAction(jsonEncode(a));
+        }
+      }
+    });
   }
 
   void _initForegroundTask() {
@@ -755,6 +1108,149 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         allowWifiLock: true,
       ),
     );
+  }
+
+  void _setupChildPeerConnectionListeners(String roomCode) {
+    if (_peerConnection == null) return;
+
+    try {
+      final dcInit = RTCDataChannelInit();
+      _peerConnection!.createDataChannel('controlChannel', dcInit).then((dc) {
+        _childDataChannel = dc;
+        _childDataChannel!.onMessage = (RTCDataChannelMessage msg) {
+          _handleIncomingRemoteAction(msg.text);
+        };
+      }).catchError((_) {});
+    } catch (_) {}
+
+    _peerConnection!.onDataChannel = (RTCDataChannel channel) {
+      _childDataChannel = channel;
+      _childDataChannel!.onMessage = (RTCDataChannelMessage msg) {
+        _handleIncomingRemoteAction(msg.text);
+      };
+    };
+
+    _peerConnection!.onIceConnectionState = (RTCIceConnectionState state) {
+      debugPrint("📡 [Kid] ICE Connection State: $state");
+      if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
+          state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+        if (mounted) {
+          setState(() {
+            _isParentConnected = true;
+            _statusMessage = '✅ माता-पिता का फोन सफलतापूर्वक जुड़ गया है!';
+          });
+        }
+      } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected ||
+          state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+        if (mounted) {
+          setState(() {
+            _isParentConnected = false;
+            _statusMessage = 'माता-पिता का फोन डिस्कनेक्ट हो गया। पुनः जुड़ने की प्रतीक्षा...';
+          });
+        }
+        // Auto-recycle peer connection with active screen stream so parent can reconnect immediately!
+        _prepareFreshPeerConnection(roomCode);
+      }
+    };
+
+    _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
+      if (candidate.candidate != null) {
+        _collectedChildCandidates.add({
+          'candidate': candidate.candidate,
+          'sdpMid': candidate.sdpMid,
+          'sdpMLineIndex': candidate.sdpMLineIndex,
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+        });
+        _signaling.sendCandidate(
+          roomCode,
+          candidate.candidate!,
+          candidate.sdpMid,
+          candidate.sdpMLineIndex,
+          'kid',
+        );
+      }
+    };
+  }
+
+  // Generates a brand new PeerConnection from the EXISTING running screen stream
+  // ZERO PERMISSION PROMPT REQUIRED! Screen continues streaming continuously!
+  Future<Map<String, dynamic>> _prepareFreshPeerConnection(String roomCode) async {
+    if (!_isSharing || _screenStream == null) {
+      return {'sdp': _latestOfferSdp ?? '', 'type': _latestOfferType ?? 'offer'};
+    }
+    debugPrint("🔄 [Kid] Generating fresh WebRTC offer for Parent reconnection (screen stream kept alive)...");
+
+    _answerPollTimer?.cancel();
+    _candidatePollTimer?.cancel();
+
+    try {
+      await _peerConnection?.close();
+    } catch (_) {}
+    _peerConnection = null;
+    _isRemoteDescSet = false;
+    _isParentConnected = false;
+    _queuedCandidates.clear();
+    _collectedChildCandidates.clear();
+    _lastCandidateTimestamp = DateTime.now().millisecondsSinceEpoch;
+
+    try {
+      _peerConnection = await createPeerConnection(_iceServers);
+      _setupChildPeerConnectionListeners(roomCode);
+
+      for (final track in _screenStream!.getTracks()) {
+        await _peerConnection!.addTrack(track, _screenStream!);
+      }
+      if (_micAudioTrack != null && _micStream != null) {
+        await _peerConnection!.addTrack(_micAudioTrack!, _micStream!);
+      }
+
+      RTCSessionDescription offer = await _peerConnection!.createOffer({
+        'offerToReceiveVideo': 0,
+        'offerToReceiveAudio': 0,
+      });
+      await _peerConnection!.setLocalDescription(offer);
+      _latestOfferSdp = offer.sdp;
+      _latestOfferType = offer.type;
+
+      _startPollingForAnswer(roomCode);
+      _signaling.sendOffer(roomCode, offer.sdp!, offer.type!);
+
+      if (mounted) {
+        setState(() {
+          _isParentConnected = false;
+          _statusMessage = '🔴 ब्रॉडकास्ट सक्रिय है! कोड: $roomCode\nमाता-पिता के जुड़ने की प्रतीक्षा...';
+        });
+      }
+
+      return {'sdp': offer.sdp ?? '', 'type': offer.type ?? 'offer'};
+    } catch (e) {
+      debugPrint("Error preparing fresh peer connection: $e");
+      return {'sdp': _latestOfferSdp ?? '', 'type': _latestOfferType ?? 'offer'};
+    }
+  }
+
+  void _startListeningForReconnectRequests(String roomCode) {
+    _reconnectListenTimer?.cancel();
+    _reconnectListenTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) async {
+      if (!_isSharing || _screenStream == null) return;
+
+      // 1. Check parent connect request
+      final reqTs = await _signaling.getLatestRequestTimestamp(roomCode);
+      if (reqTs != null && reqTs > _lastHandledReqTimestamp) {
+        _lastHandledReqTimestamp = reqTs;
+        debugPrint("⚡ [Kid] Received fresh connection request from Parent ($reqTs)");
+        await _prepareFreshPeerConnection(roomCode);
+        return;
+      }
+
+      // 2. Check parent disconnect event
+      final disTs = await _signaling.getLatestDisconnectTimestamp(roomCode);
+      if (disTs != null && disTs > _lastHandledDisconnectTimestamp) {
+        _lastHandledDisconnectTimestamp = disTs;
+        debugPrint("⚡ [Kid] Received disconnect notification from Parent ($disTs)");
+        await _prepareFreshPeerConnection(roomCode);
+      }
+    });
   }
 
   Future<void> _startScreenShare() async {
@@ -783,46 +1279,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       });
 
       _peerConnection = await createPeerConnection(_iceServers);
-
-      _peerConnection!.onIceConnectionState = (RTCIceConnectionState state) {
-        debugPrint("📡 [Kid] ICE Connection State: $state");
-        if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
-            state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
-          if (mounted) {
-            setState(() {
-              _isParentConnected = true;
-              _statusMessage = '✅ माता-पिता का फोन सफलतापूर्वक जुड़ गया है!';
-            });
-          }
-        } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected ||
-            state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
-          if (mounted) {
-            setState(() {
-              _isParentConnected = false;
-              _statusMessage = 'माता-पिता का कनेक्शन डिस्कनेक्ट हो गया।';
-            });
-          }
-        }
-      };
-
-      // Handle ICE Candidates generated on Kid side
-      _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
-        if (candidate.candidate != null) {
-          _collectedChildCandidates.add({
-            'candidate': candidate.candidate,
-            'sdpMid': candidate.sdpMid,
-            'sdpMLineIndex': candidate.sdpMLineIndex,
-            'timestamp': DateTime.now().millisecondsSinceEpoch,
-          });
-          _signaling.sendCandidate(
-            roomCode,
-            candidate.candidate!,
-            candidate.sdpMid,
-            candidate.sdpMLineIndex,
-            'kid',
-          );
-        }
-      };
+      _setupChildPeerConnectionListeners(roomCode);
 
       setState(() {
         _statusMessage = '2/4: स्क्रीन शेयर अनुमति मांग रहे हैं... (कृपया "Entire screen" चुनें)';
@@ -857,12 +1314,27 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         };
       });
 
+      // Capture Microphone Audio for Parent Live Listening
+      try {
+        _micStream = await navigator.mediaDevices.getUserMedia({'audio': true, 'video': false});
+        if (_micStream != null && _micStream!.getAudioTracks().isNotEmpty) {
+          _micAudioTrack = _micStream!.getAudioTracks().first;
+          _micAudioTrack!.enabled = _isMicActive;
+          debugPrint('🎙️ [Kid] Mic capture initialized');
+        }
+      } catch (micErr) {
+        debugPrint('🎙️ [Kid] Mic capture note (non-fatal): $micErr');
+      }
+
       setState(() {
-        _statusMessage = '3/4: वीडियो ट्रैक PeerConnection में जोड़ रहे हैं...';
+        _statusMessage = '3/4: वीडियो व ऑडियो ट्रैक PeerConnection में जोड़ रहे हैं...';
       });
 
       for (final track in stream.getTracks()) {
         await _peerConnection!.addTrack(track, stream);
+      }
+      if (_micAudioTrack != null && _micStream != null) {
+        await _peerConnection!.addTrack(_micAudioTrack!, _micStream!);
       }
 
       setState(() {
@@ -890,6 +1362,11 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         roomCode: roomCode,
         getOfferSdp: () => _latestOfferSdp ?? offer.sdp ?? '',
         getOfferType: () => _latestOfferType ?? offer.type ?? 'offer',
+        onRequestFreshOffer: () => _prepareFreshPeerConnection(roomCode),
+        onParentDisconnected: () => _prepareFreshPeerConnection(roomCode),
+        onActionReceived: (actionMap) {
+          _handleIncomingRemoteAction(jsonEncode(actionMap));
+        },
         onAnswerReceived: (sdp, type) async {
           if (_peerConnection != null && !_isRemoteDescSet) {
             _isRemoteDescSet = true;
@@ -913,10 +1390,16 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         getChildCandidates: () => _collectedChildCandidates,
       );
 
+      // Start action polling on Cloud Relay
+      _startPollingForActions(roomCode);
+
       // 2. Poll for Parent's Answer on Cloud Relay
       _startPollingForAnswer(roomCode);
 
-      // 3. Send initial Offer asynchronously
+      // 3. Listen for reconnection/offer requests from Parent
+      _startListeningForReconnectRequests(roomCode);
+
+      // 4. Send initial Offer asynchronously
       _signaling.sendOffer(roomCode, offer.sdp!, offer.type!).then((ok) {
         if (mounted && _isSharing) {
           setState(() {
@@ -925,11 +1408,11 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         }
       });
 
-      // 4. Offer Heartbeat: keep refreshing Offer every 2.5s so parent can connect anytime!
+      // 5. Offer Heartbeat: keep refreshing Offer so parent can connect anytime!
       _offerHeartbeatTimer?.cancel();
       _offerHeartbeatTimer = Timer.periodic(const Duration(milliseconds: 2500), (_) {
-        if (_isSharing && !_isParentConnected && _peerConnection != null) {
-          _signaling.sendOffer(roomCode, offer.sdp!, offer.type!);
+        if (_isSharing && !_isParentConnected && _peerConnection != null && _latestOfferSdp != null) {
+          _signaling.sendOffer(roomCode, _latestOfferSdp!, _latestOfferType ?? 'offer');
         }
       });
 
@@ -1032,6 +1515,12 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
     _candidatePollTimer?.cancel();
     _offerHeartbeatTimer?.cancel();
     _offerHeartbeatTimer = null;
+    _reconnectListenTimer?.cancel();
+    _reconnectListenTimer = null;
+    _actionPollTimer?.cancel();
+    _actionPollTimer = null;
+    _actionFeedbackTimer?.cancel();
+    _actionFeedbackTimer = null;
     _localLan.stop();
     _collectedChildCandidates.clear();
 
@@ -1040,6 +1529,14 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
     } catch (_) {}
     _screenStream?.getTracks().forEach((track) => track.stop());
     _screenStream = null;
+    _micAudioTrack?.stop();
+    _micStream?.dispose();
+    _micAudioTrack = null;
+    _micStream = null;
+    try {
+      await _childDataChannel?.close();
+    } catch (_) {}
+    _childDataChannel = null;
     try {
       await _peerConnection?.close();
     } catch (_) {}
@@ -1200,6 +1697,34 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
               ),
             ),
 
+            if (_remoteActionFeedback != null) ...[
+              const SizedBox(height: 14),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF312E81).withOpacity(0.5),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.cyanAccent.withOpacity(0.8), width: 1.5),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.touch_app, color: Colors.cyanAccent, size: 24),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        _remoteActionFeedback!,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+
             if (!_isSharing) ...[
               const SizedBox(height: 16),
               Container(
@@ -1274,6 +1799,14 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
   String _iceState = 'None';
   String _videoResolution = '0x0';
 
+  // Remote Touch & Live Audio Controls
+  bool _isLiveAudioOn = false;
+  bool _isRemoteTouchOn = false;
+  MediaStreamTrack? _remoteAudioTrack;
+  RTCDataChannel? _parentDataChannel;
+  Offset? _touchFeedbackPos;
+  Timer? _touchFeedbackTimer;
+
   Timer? _candidatePollTimer;
   int _lastCandidateTimestamp = 0;
   bool _isRemoteDescSet = false;
@@ -1307,6 +1840,115 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     };
   }
 
+  void _sendRemoteAction(Map<String, dynamic> actionData) {
+    final roomCode = _codeController.text.trim().toUpperCase();
+    if (roomCode.isEmpty) return;
+
+    final fullData = {
+      ...actionData,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+    };
+
+    // 1. DataChannel (instant zero-latency WebRTC)
+    try {
+      if (_parentDataChannel != null) {
+        _parentDataChannel!.send(RTCDataChannelMessage(jsonEncode(fullData)));
+      }
+    } catch (_) {}
+
+    // 2. Direct LAN (if on same Wi-Fi)
+    if (_isLanConnection) {
+      _localLan.sendActionToLan(fullData);
+    }
+
+    // 3. Cloud Relay (ntfy + server)
+    _signaling.sendAction(roomCode, fullData);
+  }
+
+  void _toggleLiveAudio() {
+    setState(() {
+      _isLiveAudioOn = !_isLiveAudioOn;
+    });
+
+    if (_remoteAudioTrack != null) {
+      _remoteAudioTrack!.enabled = _isLiveAudioOn;
+    }
+
+    _sendRemoteAction({
+      'type': 'TOGGLE_AUDIO',
+      'enabled': _isLiveAudioOn,
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(_isLiveAudioOn
+            ? '🔊 लाइव ऑडियो चालू: बच्चे के फोन की आवाज सुनाई दे रही है'
+            : '🔇 लाइव ऑडियो म्यूट किया गया'),
+        duration: const Duration(seconds: 1),
+        backgroundColor: _isLiveAudioOn ? Colors.teal : Colors.blueGrey,
+      ),
+    );
+  }
+
+  void _toggleRemoteTouch() {
+    setState(() {
+      _isRemoteTouchOn = !_isRemoteTouchOn;
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(_isRemoteTouchOn
+            ? '👆 रिमोट टच चालू: स्क्रीन पर कहीं भी टैप करें'
+            : '👆 रिमोट टच मोड बंद किया गया'),
+        duration: const Duration(seconds: 1),
+        backgroundColor: _isRemoteTouchOn ? Colors.green : Colors.blueGrey,
+      ),
+    );
+  }
+
+  void _handleRemoteScreenTap(Offset localPos, BoxConstraints constraints) {
+    if (!_isRemoteTouchOn) return;
+
+    final normX = (localPos.dx / constraints.maxWidth).clamp(0.0, 1.0);
+    final normY = (localPos.dy / constraints.maxHeight).clamp(0.0, 1.0);
+
+    setState(() {
+      _touchFeedbackPos = localPos;
+    });
+
+    _touchFeedbackTimer?.cancel();
+    _touchFeedbackTimer = Timer(const Duration(milliseconds: 650), () {
+      if (mounted) {
+        setState(() {
+          _touchFeedbackPos = null;
+        });
+      }
+    });
+
+    HapticFeedback.lightImpact();
+
+    _sendRemoteAction({
+      'type': 'REMOTE_TOUCH',
+      'action': 'TAP',
+      'x': normX,
+      'y': normY,
+    });
+  }
+
+  void _sendRemoteNavAction(String key, String label) {
+    HapticFeedback.mediumImpact();
+    _sendRemoteAction({
+      'type': 'REMOTE_NAV',
+      'key': key,
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('👆 रिमोट एक्शन भेजा: $label'),
+        duration: const Duration(milliseconds: 700),
+      ),
+    );
+  }
+
   Future<void> _connectToChild() async {
     final roomCode = _codeController.text.trim().toUpperCase();
     if (roomCode.isEmpty) {
@@ -1324,8 +1966,14 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     });
 
     try {
-      Map<String, dynamic>? offerData;
+      final reqTimestamp = DateTime.now().millisecondsSinceEpoch;
       _isLanConnection = false;
+
+      // Request fresh offer via LAN and Cloud Relay
+      _localLan.sendDisconnectToLan();
+      _signaling.requestFreshOffer(roomCode, reqTimestamp);
+
+      Map<String, dynamic>? offerData;
 
       for (int attempt = 1; attempt <= 40; attempt++) {
         if (!mounted || !_isConnecting) return;
@@ -1335,8 +1983,8 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
 
         // 1. Direct Wi-Fi LAN search (Instant <200ms when both phones are on same Wi-Fi)
         try {
-          final lanOffer = await _localLan.discoverOnLan(roomCode);
-          if (lanOffer != null && lanOffer['sdp'] != null) {
+          final lanOffer = await _localLan.discoverOnLan(roomCode, requestFresh: attempt == 1 || attempt % 3 == 0);
+          if (lanOffer != null && lanOffer['sdp'] != null && (lanOffer['sdp'] as String).isNotEmpty) {
             offerData = lanOffer;
             _isLanConnection = true;
             debugPrint("🎯 [Parent] Discovered Child via Direct Wi-Fi LAN!");
@@ -1344,9 +1992,9 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
           }
         } catch (_) {}
 
-        // 2. Cloud Relay search (ntfy.sh)
-        offerData = await _signaling.getOffer(roomCode);
-        if (offerData != null && offerData['sdp'] != null) {
+        // 2. Cloud Relay search (ntfy.sh) - only accepts fresh offer generated around or after this connection attempt
+        offerData = await _signaling.getOffer(roomCode, minTimestamp: reqTimestamp - 3000);
+        if (offerData != null && offerData['sdp'] != null && (offerData['sdp'] as String).isNotEmpty) {
           debugPrint("🎯 [Parent] Discovered Child via Cloud Relay!");
           break;
         }
@@ -1369,6 +2017,14 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
       });
 
       _peerConnection = await createPeerConnection(_iceServers);
+
+      // DataChannel listener on Parent
+      _peerConnection!.onDataChannel = (RTCDataChannel channel) {
+        _parentDataChannel = channel;
+        _parentDataChannel!.onMessage = (RTCDataChannelMessage msg) {
+          debugPrint("Parent received DataChannel message: ${msg.text}");
+        };
+      };
 
       _peerConnection!.onIceConnectionState = (RTCIceConnectionState state) {
         debugPrint("📡 ICE Connection State: $state");
@@ -1407,6 +2063,10 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
               _statusText = '🟢 लाइव स्क्रीन दिख रही है!';
             });
           }
+        } else if (event.track.kind == 'audio') {
+          _remoteAudioTrack = event.track;
+          _remoteAudioTrack!.enabled = _isLiveAudioOn;
+          debugPrint("🎙️ [Parent] Audio track registered: enabled=$_isLiveAudioOn");
         }
       };
 
@@ -1432,7 +2092,10 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
       await _peerConnection!.setRemoteDescription(offer);
       _isRemoteDescSet = true;
 
-      RTCSessionDescription answer = await _peerConnection!.createAnswer({});
+      RTCSessionDescription answer = await _peerConnection!.createAnswer({
+        'offerToReceiveVideo': 1,
+        'offerToReceiveAudio': 1,
+      });
       await _peerConnection!.setLocalDescription(answer);
 
       // Send Answer to both LAN (if connected) and Cloud Relay
@@ -1441,6 +2104,7 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
       }
       await _signaling.sendAnswer(roomCode, answer.sdp!, answer.type!);
 
+      _lastCandidateTimestamp = reqTimestamp - 1000;
       _startListeningToKidIceCandidates(roomCode);
 
       setState(() {
@@ -1492,8 +2156,20 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
   }
 
   void _disconnect() {
+    final roomCode = _codeController.text.trim().toUpperCase();
     _candidatePollTimer?.cancel();
+    _touchFeedbackTimer?.cancel();
+    _localLan.sendDisconnectToLan();
     _localLan.stop();
+    if (roomCode.isNotEmpty) {
+      _signaling.sendDisconnect(roomCode);
+    }
+    try {
+      _parentDataChannel?.close();
+    } catch (_) {}
+    _parentDataChannel = null;
+    _remoteAudioTrack?.stop();
+    _remoteAudioTrack = null;
     try {
       _peerConnection?.close();
     } catch (_) {}
@@ -1501,11 +2177,15 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     _remoteRenderer.srcObject = null;
     _isRemoteDescSet = false;
     _queuedCandidates.clear();
+    _lastCandidateTimestamp = DateTime.now().millisecondsSinceEpoch;
     if (mounted) {
       setState(() {
         _isConnected = false;
         _isConnecting = false;
         _hasRemoteVideo = false;
+        _isLiveAudioOn = false;
+        _isRemoteTouchOn = false;
+        _touchFeedbackPos = null;
         _iceState = 'None';
         _videoResolution = '0x0';
         _statusText = 'डिस्कनेक्ट हो गया।';
@@ -1523,6 +2203,8 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
 
   @override
   Widget build(BuildContext context) {
+    final bool isSessionConnected = (_isConnected || _hasRemoteVideo) && _remoteRenderer.srcObject != null;
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('माता-पिता का लाइव मॉनिटर'),
@@ -1575,7 +2257,7 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
               ],
             ),
 
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
 
             // Diagnostics Bar
             Container(
@@ -1602,10 +2284,120 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
               ),
             ),
 
-            const SizedBox(height: 12),
+            // ONLY WHEN CONNECTED: Render Remote Touch & Live Audio Controls
+            if (isSessionConnected) ...[
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E293B),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: Colors.cyanAccent.withOpacity(0.4)),
+                ),
+                child: Column(
+                  children: [
+                    Row(
+                      children: [
+                        // 1. REMOTE TOUCH BUTTON
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            icon: Icon(
+                              _isRemoteTouchOn ? Icons.touch_app : Icons.touch_app_outlined,
+                              size: 18,
+                              color: Colors.white,
+                            ),
+                            label: Text(
+                              _isRemoteTouchOn ? '👆 रिमोट टच: चालू' : '👆 रिमोट टच: बंद',
+                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: _isRemoteTouchOn ? Colors.green.shade600 : Colors.blueGrey.shade800,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                            ),
+                            onPressed: _toggleRemoteTouch,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
 
-            // FIX 4: FLUTTER UI RTCVIDEOVIEW SIZE 0x0 FIX
-            // Parent UI me SizedBox.expand use karo taaki video container height aur width non-zero rahe!
+                        // 2. LIVE AUDIO ON/OFF BUTTON
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            icon: Icon(
+                              _isLiveAudioOn ? Icons.volume_up : Icons.volume_off,
+                              size: 18,
+                              color: Colors.white,
+                            ),
+                            label: Text(
+                              _isLiveAudioOn ? '🔊 ऑडियो: चालू' : '🔇 ऑडियो: बंद',
+                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: _isLiveAudioOn ? Colors.teal.shade600 : Colors.blueGrey.shade800,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                            ),
+                            onPressed: _toggleLiveAudio,
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    if (_isLiveAudioOn) ...[
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.teal.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.tealAccent.withOpacity(0.5)),
+                        ),
+                        child: const Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.graphic_eq, color: Colors.tealAccent, size: 16),
+                            SizedBox(width: 6),
+                            Text(
+                              '🎙️ लाइव ऑडियो सक्रिय — बच्चे के आसपास की आवाज सुनाई दे रही है',
+                              style: TextStyle(fontSize: 11, color: Colors.tealAccent, fontWeight: FontWeight.bold),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+
+                    if (_isRemoteTouchOn) ...[
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.green.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.greenAccent.withOpacity(0.5)),
+                        ),
+                        child: const Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.ads_click, color: Colors.greenAccent, size: 16),
+                            SizedBox(width: 6),
+                            Text(
+                              'स्क्रीन पर जहां टैप करेंगे, वही कमांड बच्चे के फोन पर जाएगी',
+                              style: TextStyle(fontSize: 11, color: Colors.greenAccent, fontWeight: FontWeight.bold),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+
+            const SizedBox(height: 10),
+
+            // Video Feed Container with Remote Touch Interaction
             Expanded(
               child: Container(
                 width: double.infinity,
@@ -1613,17 +2405,63 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
                   color: Colors.black,
                   borderRadius: BorderRadius.circular(16),
                   border: Border.all(
-                    color: _hasRemoteVideo ? Colors.cyanAccent.withOpacity(0.5) : Colors.white24,
+                    color: _hasRemoteVideo
+                        ? (_isRemoteTouchOn ? Colors.greenAccent : Colors.cyanAccent.withOpacity(0.5))
+                        : Colors.white24,
+                    width: _isRemoteTouchOn ? 2 : 1,
                   ),
                 ),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(16),
-                  child: (_isConnected || _hasRemoteVideo) && _remoteRenderer.srcObject != null
-                      ? SizedBox.expand(
-                          child: RTCVideoView(
-                            _remoteRenderer,
-                            objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                          ),
+                  child: isSessionConnected
+                      ? LayoutBuilder(
+                          builder: (context, constraints) {
+                            return Stack(
+                              children: [
+                                SizedBox.expand(
+                                  child: RTCVideoView(
+                                    _remoteRenderer,
+                                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                                  ),
+                                ),
+
+                                // Interactive Gesture Detector for Remote Touch
+                                if (_isRemoteTouchOn)
+                                  Positioned.fill(
+                                    child: GestureDetector(
+                                      behavior: HitTestBehavior.opaque,
+                                      onTapDown: (details) => _handleRemoteScreenTap(details.localPosition, constraints),
+                                      child: Container(
+                                        color: Colors.transparent,
+                                      ),
+                                    ),
+                                  ),
+
+                                // Animated Touch Feedback Ripple under finger
+                                if (_touchFeedbackPos != null)
+                                  Positioned(
+                                    left: _touchFeedbackPos!.dx - 24,
+                                    top: _touchFeedbackPos!.dy - 24,
+                                    child: Container(
+                                      width: 48,
+                                      height: 48,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: Colors.cyanAccent.withOpacity(0.4),
+                                        border: Border.all(color: Colors.white, width: 2),
+                                        boxShadow: const [
+                                          BoxShadow(
+                                            color: Colors.cyanAccent,
+                                            blurRadius: 16,
+                                            spreadRadius: 4,
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            );
+                          },
                         )
                       : Center(
                           child: Padding(
@@ -1652,9 +2490,57 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
               ),
             ),
 
-            const SizedBox(height: 12),
+            // Remote Navigation Control Bar (ONLY when connected & Remote Touch is ON)
+            if (isSessionConnected && _isRemoteTouchOn) ...[
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0F172A),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: Colors.greenAccent.withOpacity(0.4)),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.arrow_back, color: Colors.white),
+                      tooltip: 'पीछे जाएं (Back)',
+                      onPressed: () => _sendRemoteNavAction('BACK', 'पीछे जाएं (Back)'),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.circle_outlined, color: Colors.white),
+                      tooltip: 'होम स्क्रीन (Home)',
+                      onPressed: () => _sendRemoteNavAction('HOME', 'होम स्क्रीन (Home)'),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.crop_square, color: Colors.white),
+                      tooltip: 'हाल के ऐप्स (Recents)',
+                      onPressed: () => _sendRemoteNavAction('RECENTS', 'हाल के ऐप्स (Recents)'),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.arrow_upward, color: Colors.white),
+                      tooltip: 'ऊपर स्क्रॉल (Scroll Up)',
+                      onPressed: () => _sendRemoteNavAction('SCROLL_UP', 'ऊपर स्क्रॉल (Scroll Up)'),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.arrow_downward, color: Colors.white),
+                      tooltip: 'नीचे स्क्रॉल (Scroll Down)',
+                      onPressed: () => _sendRemoteNavAction('SCROLL_DOWN', 'नीचे स्क्रॉल (Scroll Down)'),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.notifications_active, color: Colors.amberAccent),
+                      tooltip: 'अलर्ट घंटी (Buzzer)',
+                      onPressed: () => _sendRemoteNavAction('BUZZER', 'अलर्ट बज़र बज गया'),
+                    ),
+                  ],
+                ),
+              ),
+            ],
 
-            if (_isConnected || _hasRemoteVideo)
+            const SizedBox(height: 10),
+
+            if (isSessionConnected)
               ElevatedButton.icon(
                 icon: const Icon(Icons.stop, color: Colors.white),
                 label: const Text('डिस्कनेक्ट करें'),

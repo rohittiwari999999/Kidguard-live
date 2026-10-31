@@ -1,7 +1,7 @@
 import { Peer, MediaConnection, DataConnection } from 'peerjs';
 
 export interface PeerMessage {
-  type: 'ALERT' | 'PING' | 'ACK' | 'APP_CHANGE' | 'HEARTBEAT' | 'REQUEST_STREAM' | 'PARENT_JOINED';
+  type: 'ALERT' | 'PING' | 'ACK' | 'APP_CHANGE' | 'HEARTBEAT' | 'REQUEST_STREAM' | 'PARENT_JOINED' | 'TOGGLE_AUDIO' | 'REMOTE_TOUCH' | 'REMOTE_NAV';
   payload: any;
   timestamp: number;
 }
@@ -432,6 +432,16 @@ export class PeerManager {
     this.stopHttpSignaling();
     const codes = this.possibleCodes(roomCode);
     const rawCode = roomCode.trim().toUpperCase();
+    const watchStartTime = Date.now();
+
+    // Notify child device to prepare fresh offer for this parent
+    for (const c of codes) {
+      fetch(`https://ntfy.sh/kg_signal_${c}_req`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify({ request: 'offer', timestamp: watchStartTime }),
+      }).catch(() => {});
+    }
 
     const tryConnect = async () => {
       try {
@@ -451,7 +461,7 @@ export class PeerManager {
                   const parsed = JSON.parse(line);
                   if (parsed.message) {
                     const inner = JSON.parse(parsed.message);
-                    if (inner.sdp) {
+                    if (inner.sdp && (!inner.timestamp || inner.timestamp >= watchStartTime - 3500)) {
                       offerData = inner;
                       break;
                     }
