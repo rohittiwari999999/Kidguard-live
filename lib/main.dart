@@ -1389,7 +1389,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
 
       try {
         await Permission.notification.request();
-        await [Permission.camera, Permission.microphone].request();
+        await Permission.microphone.request();
       } catch (permError) {
         debugPrint('Permission notice: $permError');
       }
@@ -1405,16 +1405,18 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         _statusMessage = '2/4: स्क्रीन शेयर अनुमति मांग रहे हैं... (कृपया "Entire screen" चुनें)';
       });
 
+      // Start background keep-alive foreground service
       try {
-        final ready = await _platformChannel.invokeMethod('prepareScreenCapture');
-        if (ready != true) {
-          setState(() {
-            _statusMessage = 'अनुमति नहीं मिली या रद्द कर दी गई।';
-          });
-          return;
-        }
+        await _platformChannel.invokeMethod('startForegroundService');
       } catch (nativeErr) {
-        debugPrint('prepareScreenCapture notice: $nativeErr');
+        debugPrint('startForegroundService notice: $nativeErr');
+      }
+
+      // Request official WebRTC Screen Capture Permission on Android
+      try {
+        await Helper.requestCapturePermission(fullScreenOnly: false);
+      } catch (captureErr) {
+        debugPrint('Helper.requestCapturePermission notice: $captureErr');
       }
 
       final mediaConstraints = <String, dynamic>{
@@ -1426,6 +1428,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       _screenStream = stream;
 
       stream.getVideoTracks().forEach((track) {
+        track.enabled = true;
         track.onEnded = () {
           debugPrint('Screen capture track ended (system notification stop)');
           if (mounted) {
@@ -2299,11 +2302,12 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
         debugPrint("🔥 Track received: ${event.track.kind}, Streams count: ${event.streams.length}");
 
         if (event.track.kind == 'video') {
-          if (event.streams.isNotEmpty) {
+          event.track.enabled = true;
+          if (event.streams.isNotEmpty && event.streams[0].getVideoTracks().isNotEmpty) {
             _remoteRenderer.srcObject = event.streams[0];
           } else {
             MediaStream newStream = await createLocalMediaStream('remoteVideoStream');
-            newStream.addTrack(event.track);
+            await newStream.addTrack(event.track);
             _remoteRenderer.srcObject = newStream;
           }
           if (mounted) {

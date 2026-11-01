@@ -525,6 +525,7 @@ export class PeerManager {
 
         this.httpPc.ontrack = (event: RTCTrackEvent) => {
           console.log(`🔥 [HTTP WebRTC] Track received: ${event.track.kind}, streams count: ${event.streams?.length || 0}`);
+          event.track.enabled = true;
           let streamToUse: MediaStream;
           if (event.streams && event.streams.length > 0 && event.streams[0]) {
             streamToUse = event.streams[0];

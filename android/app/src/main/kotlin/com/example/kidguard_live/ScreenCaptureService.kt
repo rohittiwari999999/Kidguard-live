@@ -48,46 +48,8 @@ class ScreenCaptureService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
-                val data: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    intent.getParcelableExtra(EXTRA_DATA, Intent::class.java)
-                } else {
-                    @Suppress("DEPRECATION")
-                    intent.getParcelableExtra(EXTRA_DATA)
-                }
-
-                // 1. Immediately enter foreground state to satisfy Android 14+ requirements
                 startForegroundWithNotification()
-
-                // 2. Initialize MediaProjection with granted token if available
-                if (resultCode == Activity.RESULT_OK && data != null) {
-                    try {
-                        val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                        activeMediaProjection?.stop()
-                        activeMediaProjection = mpm.getMediaProjection(resultCode, data)
-                        activeMediaProjection?.registerCallback(object : MediaProjection.Callback() {
-                            override fun onStop() {
-                                super.onStop()
-                                Log.d("ScreenCaptureService", "MediaProjection stopped by system notification or user action")
-                                activeMediaProjection = null
-                                try {
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                                        stopForeground(STOP_FOREGROUND_REMOVE)
-                                    } else {
-                                        @Suppress("DEPRECATION")
-                                        stopForeground(true)
-                                    }
-                                    stopSelf()
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
-                                }
-                            }
-                        }, Handler(Looper.getMainLooper()))
-                        Log.d("ScreenCaptureService", "MediaProjection successfully acquired")
-                    } catch (e: Exception) {
-                        Log.e("ScreenCaptureService", "MediaProjection acquisition notice: ${e.message}")
-                    }
-                }
+                Log.d("ScreenCaptureService", "Foreground keep-alive service running")
             }
             ACTION_STOP -> {
                 try {
