@@ -1405,26 +1405,40 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         _statusMessage = '2/4: स्क्रीन शेयर अनुमति मांग रहे हैं... (कृपया "Entire screen" चुनें)';
       });
 
-      // Start background keep-alive foreground service
-      try {
-        await _platformChannel.invokeMethod('startForegroundService');
-      } catch (nativeErr) {
-        debugPrint('startForegroundService notice: $nativeErr');
-      }
-
-      // Request official WebRTC Screen Capture Permission on Android
+      // 1. Explicitly request official WebRTC Screen Capture Permission FIRST on Android
       try {
         await Helper.requestCapturePermission(fullScreenOnly: false);
       } catch (captureErr) {
         debugPrint('Helper.requestCapturePermission notice: $captureErr');
       }
 
+      // 2. Start background keep-alive foreground service AFTER permission dialog is initiated
+      try {
+        await _platformChannel.invokeMethod('startForegroundService');
+      } catch (nativeErr) {
+        debugPrint('startForegroundService notice: $nativeErr');
+      }
+
+      // 3. Obtain display media with explicit resolution constraints (avoids Android 0x0 VirtualDisplay bug)
       final mediaConstraints = <String, dynamic>{
         'audio': false,
-        'video': true,
+        'video': {
+          'mandatory': {
+            'minWidth': '720',
+            'minHeight': '1280',
+            'minFrameRate': '30',
+          },
+          'optional': [],
+        },
       };
 
-      MediaStream stream = await navigator.mediaDevices.getDisplayMedia(mediaConstraints);
+      MediaStream stream;
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia(mediaConstraints);
+      } catch (e) {
+        debugPrint('Fallback to basic display constraints: $e');
+        stream = await navigator.mediaDevices.getDisplayMedia({'audio': false, 'video': true});
+      }
       _screenStream = stream;
 
       stream.getVideoTracks().forEach((track) {
@@ -2289,7 +2303,11 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
                 state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
               _isConnected = true;
               _isConnecting = false;
-              _statusText = '🟢 लाइव स्ट्रीम कनेक्ट हो गई!';
+              if (_remoteRenderer.videoWidth > 0 && _remoteRenderer.videoHeight > 0) {
+                _statusText = '🟢 लाइव स्क्रीन दिख रही है!';
+              } else {
+                _statusText = '🟢 सिग्नल कनेक्ट हो गया! स्क्रीन स्ट्रीम लोड हो रही है...';
+              }
             } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
                 state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
               _statusText = '⚠️ कनेक्शन टूट गया। पुनः प्रयास करें।';
@@ -2303,19 +2321,20 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
 
         if (event.track.kind == 'video') {
           event.track.enabled = true;
+          MediaStream streamToDisplay;
           if (event.streams.isNotEmpty && event.streams[0].getVideoTracks().isNotEmpty) {
-            _remoteRenderer.srcObject = event.streams[0];
+            streamToDisplay = event.streams[0];
           } else {
-            MediaStream newStream = await createLocalMediaStream('remoteVideoStream');
-            await newStream.addTrack(event.track);
-            _remoteRenderer.srcObject = newStream;
+            streamToDisplay = await createLocalMediaStream('remoteVideoStream');
+            await streamToDisplay.addTrack(event.track);
           }
+          _remoteRenderer.srcObject = streamToDisplay;
           if (mounted) {
             setState(() {
               _hasRemoteVideo = true;
               _isConnected = true;
               _isConnecting = false;
-              _statusText = '🟢 लाइव स्क्रीन दिख रही है!';
+              _statusText = '🟢 लाइव स्क्रीन प्राप्त हो गई!';
             });
           }
         } else if (event.track.kind == 'audio') {

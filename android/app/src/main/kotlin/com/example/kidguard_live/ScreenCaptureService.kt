@@ -94,7 +94,11 @@ class ScreenCaptureService : Service() {
                 } catch (typeEx: Exception) {
                     Log.w("ScreenCaptureService", "startForeground mediaProjection fallback: ${typeEx.message}")
                     try {
-                        startForeground(NOTIFICATION_ID, notification)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                        } else {
+                            startForeground(NOTIFICATION_ID, notification)
+                        }
                     } catch (e: Exception) {
                         e.printStackTrace()
                     }

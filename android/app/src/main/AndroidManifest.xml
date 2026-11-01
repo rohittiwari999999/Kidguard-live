@@ -37,9 +37,14 @@
             </intent-filter>
         </activity>
 
-        <!-- Official flutter_webrtc Screen Capture Foreground Service (Crucial for Android 14/15/16) -->
+        <!-- Official flutter_webrtc Screen Capture Foreground Services (Crucial for Android 14/15/16) -->
         <service
             android:name="com.cloudwebrtc.webrtc.ForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <service
+            android:name="com.google.webrtc.audio.WebRtcAudioService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
 
@@ -49,10 +54,10 @@
             android:foregroundServiceType="mediaProjection"
             android:stopWithTask="true" />
 
-        <!-- Native Android Screen Streaming Helper Foreground Service (mediaProjection type for Android 14/15/16) -->
+        <!-- Native Android Screen Streaming Helper Foreground Service (mediaProjection and dataSync for Android 14/15/16) -->
         <service
             android:name=".ScreenCaptureService"
-            android:foregroundServiceType="mediaProjection"
+            android:foregroundServiceType="mediaProjection|dataSync"
             android:exported="false" />
 
         <meta-data
