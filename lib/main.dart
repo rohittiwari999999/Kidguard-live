@@ -1072,6 +1072,17 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
     });
   }
 
+  void _toggleLocalMic() {
+    setState(() {
+      _isMicActive = !_isMicActive;
+      _micAudioTrack?.enabled = _isMicActive;
+      _remoteActionFeedback = _isMicActive
+          ? '🎙️ लाइव ऑडियो चालू है (माइक एक्टिव)'
+          : '🔇 लाइव ऑडियो म्यूट किया गया';
+    });
+    _resetFeedbackTimer();
+  }
+
   void _startPollingForActions(String roomCode) {
     _actionPollTimer?.cancel();
     _lastActionTimestamp = DateTime.now().millisecondsSinceEpoch;
@@ -1657,6 +1668,85 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            // Top Live Audio Status & Toggle Banner on Child Mobile Screen
+            Container(
+              margin: const EdgeInsets.only(bottom: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: _isMicActive ? const Color(0xFF064E3B).withOpacity(0.85) : const Color(0xFF1E293B),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: _isMicActive ? Colors.greenAccent : Colors.white24,
+                  width: 1.5,
+                ),
+                boxShadow: _isMicActive
+                    ? [
+                        BoxShadow(
+                          color: Colors.greenAccent.withOpacity(0.25),
+                          blurRadius: 10,
+                          spreadRadius: 1,
+                        ),
+                      ]
+                    : [],
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _isMicActive ? Colors.greenAccent.withOpacity(0.25) : Colors.white10,
+                    ),
+                    child: Icon(
+                      _isMicActive ? Icons.mic : Icons.mic_off,
+                      color: _isMicActive ? Colors.greenAccent : Colors.white54,
+                      size: 22,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _isMicActive ? '🎙️ लाइव ऑडियो: चालू (माइक एक्टिव)' : '🔇 लाइव ऑडियो: म्यूट (बंद)',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          _isMicActive
+                              ? 'माता-पिता आपके फोन की लाइव आवाज सुन सकते हैं'
+                              : 'माइक्रोफोन म्यूट है (कोई आवाज नहीं जा रही)',
+                          style: TextStyle(
+                            color: _isMicActive ? Colors.greenAccent.shade100 : Colors.white60,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _isMicActive ? Colors.green : Colors.grey.shade700,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      minimumSize: const Size(60, 34),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                    onPressed: _toggleLocalMic,
+                    child: Text(
+                      _isMicActive ? 'म्यूट' : 'चालू',
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
             // Code Customization Box (Fully Editable)
             Card(
               color: const Color(0xFF1E293B),

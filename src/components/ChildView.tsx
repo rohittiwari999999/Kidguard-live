@@ -106,6 +106,24 @@ export const ChildView: React.FC<ChildViewProps> = ({
   // Video Ref for preview
   const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
   const activeStreamRef = useRef<MediaStream | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+
+  // Live Microphone / Audio state
+  const [isMicLive, setIsMicLive] = useState<boolean>(true);
+  const [remoteAudioNotice, setRemoteAudioNotice] = useState<string | null>(null);
+
+  const toggleChildMic = () => {
+    const next = !isMicLive;
+    setIsMicLive(next);
+    if (micStreamRef.current) {
+      micStreamRef.current.getAudioTracks().forEach((t) => (t.enabled = next));
+    }
+    if (activeStreamRef.current) {
+      activeStreamRef.current.getAudioTracks().forEach((t) => (t.enabled = next));
+    }
+    setRemoteAudioNotice(next ? '🎙️ माइक्रोफोन चालू है (ऑडियो लाइव)' : '🔇 माइक्रोफोन म्यूट किया गया');
+    setTimeout(() => setRemoteAudioNotice(null), 3000);
+  };
 
   // QR Code generator
   useEffect(() => {
@@ -144,7 +162,8 @@ export const ChildView: React.FC<ChildViewProps> = ({
   const requestCameraPermission = async () => {
     try {
       setBannerError(null);
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: true });
+      micStreamRef.current = stream;
       setCameraPerm('granted');
       sounds.playChime();
       activeStreamRef.current = stream;
@@ -245,7 +264,7 @@ export const ChildView: React.FC<ChildViewProps> = ({
       }
     });
 
-    // Listen to messages from Parent (like Buzzer / Alert or stream request)
+    // Listen to messages from Parent (like Buzzer / Alert, audio toggle, or stream request)
     peerManager.onMessage((msg) => {
       if (msg.type === 'ALERT') {
         const alertData: BuzzerAlert = {
@@ -256,6 +275,21 @@ export const ChildView: React.FC<ChildViewProps> = ({
         };
         setActiveAlert(alertData);
         sounds.playBuzzer();
+      } else if (msg.type === 'TOGGLE_AUDIO') {
+        const enabled = msg.payload?.enabled !== false;
+        setIsMicLive(enabled);
+        if (micStreamRef.current) {
+          micStreamRef.current.getAudioTracks().forEach((t) => (t.enabled = enabled));
+        }
+        if (activeStreamRef.current) {
+          activeStreamRef.current.getAudioTracks().forEach((t) => (t.enabled = enabled));
+        }
+        setRemoteAudioNotice(
+          enabled
+            ? '🎙️ माता-पिता ने ऑडियो चालू किया (माइक लाइव)'
+            : '🔇 माता-पिता ने ऑडियो म्यूट किया'
+        );
+        setTimeout(() => setRemoteAudioNotice(null), 4000);
       } else if (msg.type === 'REQUEST_STREAM' || msg.type === 'PARENT_JOINED') {
         console.log('Parent requested stream, sending immediately!');
         const targetParent = msg.payload?.parentId || `kg-${roomCode}-parent`;
@@ -287,6 +321,44 @@ export const ChildView: React.FC<ChildViewProps> = ({
     }
     return () => clearInterval(interval);
   }, [isStreaming, roomCode, peerManager]);
+
+  // Periodic action polling from server for remote audio toggle & control actions
+  useEffect(() => {
+    let lastTs = Date.now();
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/signal/room/${roomCode}/actions?since=${lastTs}`);
+        if (res.ok) {
+          const actions = await res.json();
+          if (Array.isArray(actions)) {
+            for (const item of actions) {
+              const ts = item.timestamp || 0;
+              if (ts > lastTs) {
+                lastTs = ts;
+                if (item.action === 'TOGGLE_AUDIO' || item.type === 'TOGGLE_AUDIO') {
+                  const enabled = item.payload?.enabled !== false;
+                  setIsMicLive(enabled);
+                  if (micStreamRef.current) {
+                    micStreamRef.current.getAudioTracks().forEach((t) => (t.enabled = enabled));
+                  }
+                  if (activeStreamRef.current) {
+                    activeStreamRef.current.getAudioTracks().forEach((t) => (t.enabled = enabled));
+                  }
+                  setRemoteAudioNotice(
+                    enabled
+                      ? '🎙️ माता-पिता ने ऑडियो चालू किया (माइक लाइव)'
+                      : '🔇 माता-पिता ने ऑडियो म्यूट किया'
+                  );
+                  setTimeout(() => setRemoteAudioNotice(null), 4000);
+                }
+              }
+            }
+          }
+        }
+      } catch {}
+    }, 1200);
+    return () => clearInterval(interval);
+  }, [roomCode]);
 
   // Start Real Screen Capture (Safe for mobile Android Chrome and Desktop)
   const startRealScreenCapture = async () => {
@@ -335,6 +407,19 @@ export const ChildView: React.FC<ChildViewProps> = ({
 
       if (!screenStream) {
         return;
+      }
+
+      // Capture and attach live microphone audio to the screen stream
+      try {
+        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        micStreamRef.current = micStream;
+        const micTrack = micStream.getAudioTracks()[0];
+        if (micTrack) {
+          micTrack.enabled = isMicLive;
+          screenStream.addTrack(micTrack);
+        }
+      } catch (micErr) {
+        console.warn('Microphone capture notice:', micErr);
       }
 
       activeStreamRef.current = screenStream;
@@ -564,6 +649,80 @@ export const ChildView: React.FC<ChildViewProps> = ({
             </button>
           )}
         </div>
+      </div>
+
+      {/* Remote Audio Feedback Toast */}
+      {remoteAudioNotice && (
+        <div className="mb-4 p-3.5 rounded-2xl bg-cyan-950/90 border border-cyan-400 text-cyan-200 shadow-xl flex items-center justify-between gap-3 animate-fade-in">
+          <div className="flex items-center gap-2.5">
+            <Mic className="w-5 h-5 text-cyan-400 animate-pulse" />
+            <span className="text-xs font-bold text-white">{remoteAudioNotice}</span>
+          </div>
+          <button
+            onClick={() => setRemoteAudioNotice(null)}
+            className="text-xs text-cyan-400 hover:text-white px-2 py-0.5"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* Top Live Audio Status & Toggle Button on Child Screen */}
+      <div className="mb-4 p-4 rounded-2xl bg-slate-900 border border-slate-800 shadow-lg flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div
+            className={`w-10 h-10 rounded-xl flex items-center justify-center transition ${
+              isMicLive
+                ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 shadow-xs'
+                : 'bg-slate-800 text-slate-500 border border-slate-700'
+            }`}
+          >
+            {isMicLive ? <Mic className="w-5 h-5 animate-pulse" /> : <MicOff className="w-5 h-5" />}
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-white">
+                {isMicLive
+                  ? lang === 'hi' ? '🎙️ लाइव ऑडियो: चालू (माइक एक्टिव)' : '🎙️ Live Audio: ON'
+                  : lang === 'hi' ? '🔇 लाइव ऑडियो: म्यूट (बंद)' : '🔇 Live Audio: MUTED'}
+              </span>
+              {isMicLive && (
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                  {lang === 'hi' ? 'लाइव' : 'LIVE'}
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-slate-400 mt-0.5">
+              {isMicLive
+                ? lang === 'hi'
+                  ? 'माता-पिता आपके फोन का ऑडियो लाइव सुन सकते हैं'
+                  : 'Parents can hear real-time device audio'
+                : lang === 'hi'
+                  ? 'माइक्रोफोन म्यूट है (कोई आवाज नहीं जा रही)'
+                  : 'Microphone is muted'}
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={toggleChildMic}
+          className={`px-3.5 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-sm active:scale-95 ${
+            isMicLive
+              ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+              : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700'
+          }`}
+        >
+          {isMicLive ? (
+            <>
+              <MicOff className="w-3.5 h-3.5" />
+              <span>{lang === 'hi' ? 'म्यूट' : 'Mute'}</span>
+            </>
+          ) : (
+            <>
+              <Mic className="w-3.5 h-3.5" />
+              <span>{lang === 'hi' ? 'चालू करें' : 'Turn On'}</span>
+            </>
+          )}
+        </button>
       </div>
 
       {/* Main Card */}

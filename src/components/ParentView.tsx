@@ -365,11 +365,12 @@ export const ParentView: React.FC<ParentViewProps> = ({
     setIsAudioMuted(nextMuted);
     if (videoRef.current) {
       videoRef.current.muted = nextMuted;
+      videoRef.current.volume = 1.0;
       if (!nextMuted) {
         videoRef.current.play().catch(() => {});
       }
     }
-    const code = connectedRoom || inputCode;
+    const code = (connectedRoom || inputCode).trim().toUpperCase();
     const payload = { enabled: !nextMuted };
     peerManager.sendMessage({
       type: 'TOGGLE_AUDIO',
@@ -379,7 +380,7 @@ export const ParentView: React.FC<ParentViewProps> = ({
     fetch(`/api/signal/room/${code}/action`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'TOGGLE_AUDIO', payload }),
+      body: JSON.stringify({ action: 'TOGGLE_AUDIO', type: 'TOGGLE_AUDIO', enabled: !nextMuted, payload }),
     }).catch(() => {});
   };
 
@@ -706,11 +707,11 @@ export const ParentView: React.FC<ParentViewProps> = ({
 
                   {/* Audio Toggle */}
                   <button
-                    onClick={() => setIsAudioMuted(!isAudioMuted)}
+                    onClick={handleToggleAudio}
                     title={isAudioMuted ? 'Unmute Audio' : 'Mute Audio'}
-                    className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 transition"
+                    className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer"
                   >
-                    {isAudioMuted ? <VolumeX className="w-4 h-4 text-rose-400" /> : <Volume2 className="w-4 h-4 text-emerald-400" />}
+                    {isAudioMuted ? <VolumeX className="w-4 h-4 text-rose-400" /> : <Volume2 className="w-4 h-4 text-emerald-400 animate-pulse" />}
                   </button>
 
                   {/* Fullscreen */}
