@@ -48,8 +48,34 @@ class ScreenCaptureService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
+                val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
+                val data: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(EXTRA_DATA, Intent::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(EXTRA_DATA)
+                }
+
+                // 1. Immediately enter foreground state to satisfy Android 14+ requirements
                 startForegroundWithNotification()
-                Log.d("ScreenCaptureService", "Foreground keep-alive service running")
+
+                // 2. Initialize MediaProjection with granted token if available
+                if (resultCode == Activity.RESULT_OK && data != null) {
+                    try {
+                        val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                        activeMediaProjection?.stop()
+                        activeMediaProjection = mpm.getMediaProjection(resultCode, data)
+                        activeMediaProjection?.registerCallback(object : MediaProjection.Callback() {
+                            override fun onStop() {
+                                super.onStop()
+                                activeMediaProjection = null
+                            }
+                        }, Handler(Looper.getMainLooper()))
+                        Log.d("ScreenCaptureService", "MediaProjection successfully acquired")
+                    } catch (e: Exception) {
+                        Log.e("ScreenCaptureService", "MediaProjection acquisition notice: ${e.message}")
+                    }
+                }
             }
             ACTION_STOP -> {
                 try {
@@ -94,11 +120,7 @@ class ScreenCaptureService : Service() {
                 } catch (typeEx: Exception) {
                     Log.w("ScreenCaptureService", "startForeground mediaProjection fallback: ${typeEx.message}")
                     try {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-                        } else {
-                            startForeground(NOTIFICATION_ID, notification)
-                        }
+                        startForeground(NOTIFICATION_ID, notification)
                     } catch (e: Exception) {
                         e.printStackTrace()
                     }

@@ -443,24 +443,9 @@ export class PeerManager {
       }).catch(() => {});
     }
 
-    let attempt = 0;
     const tryConnect = async () => {
-      attempt++;
       try {
         let offerData: any = null;
-
-        // Re-request offer periodically
-        if (attempt % 3 === 0) {
-          for (const c of codes) {
-            fetch(`https://ntfy.sh/kg_signal_${c}_req`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'text/plain' },
-              body: JSON.stringify({ request: 'offer', timestamp: Date.now() }),
-            }).catch(() => {});
-          }
-        }
-
-        const minTs = attempt < 4 ? watchStartTime - 5000 : watchStartTime - 60000;
 
         // 1. Try fetching offer from ntfy.sh (checks all code variants)
         for (const c of codes) {
@@ -476,7 +461,7 @@ export class PeerManager {
                   const parsed = JSON.parse(line);
                   if (parsed.message) {
                     const inner = JSON.parse(parsed.message);
-                    if (inner.sdp && (!inner.timestamp || inner.timestamp >= minTs)) {
+                    if (inner.sdp && (!inner.timestamp || inner.timestamp >= watchStartTime - 3500)) {
                       offerData = inner;
                       break;
                     }
@@ -497,7 +482,7 @@ export class PeerManager {
               const localRes = await fetch(`/api/signal/room/${c}/offer`);
               if (localRes.ok) {
                 const data = await localRes.json();
-                if (data?.sdp && (!data.timestamp || data.timestamp >= minTs)) offerData = data;
+                if (data?.sdp) offerData = data;
               }
             } catch {}
           }
@@ -525,7 +510,6 @@ export class PeerManager {
 
         this.httpPc.ontrack = (event: RTCTrackEvent) => {
           console.log(`🔥 [HTTP WebRTC] Track received: ${event.track.kind}, streams count: ${event.streams?.length || 0}`);
-          event.track.enabled = true;
           let streamToUse: MediaStream;
           if (event.streams && event.streams.length > 0 && event.streams[0]) {
             streamToUse = event.streams[0];

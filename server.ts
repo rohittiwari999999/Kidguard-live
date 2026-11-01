@@ -111,11 +111,6 @@ async function startServer() {
       res.status(404).json({ error: 'No answer found yet' });
       return;
     }
-    const since = req.query.since ? parseInt(req.query.since as string, 10) : 0;
-    if (since > 0 && room.answer.timestamp < since) {
-      res.status(404).json({ error: 'No fresh answer found' });
-      return;
-    }
     res.json(room.answer);
   });
 
@@ -153,14 +148,6 @@ async function startServer() {
       room.updatedAt = Date.now();
     }
     console.log(`[Signal] Room reset for reconnection: ${normalized}`);
-    res.json({ success: true });
-  });
-
-  // Stop / Wipe Room (When child stops broadcast)
-  app.post('/api/signal/room/:code/stop', (req: Request, res: Response) => {
-    const normalized = req.params.code.trim().toUpperCase();
-    rooms.delete(normalized);
-    console.log(`[Signal] Room stopped & removed: ${normalized}`);
     res.json({ success: true });
   });
 

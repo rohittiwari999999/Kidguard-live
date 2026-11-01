@@ -6,6 +6,7 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
@@ -37,27 +38,16 @@
             </intent-filter>
         </activity>
 
-        <!-- Official flutter_webrtc Screen Capture Foreground Services (Crucial for Android 14/15/16) -->
-        <service
-            android:name="com.cloudwebrtc.webrtc.ForegroundService"
-            android:exported="false"
-            android:foregroundServiceType="mediaProjection" />
-
-        <service
-            android:name="com.google.webrtc.audio.WebRtcAudioService"
-            android:exported="false"
-            android:foregroundServiceType="mediaProjection" />
-
-        <!-- General Watchdog Foreground Service (mediaProjection type) -->
+        <!-- General Watchdog Foreground Service (dataSync type) -->
         <service
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
-            android:foregroundServiceType="mediaProjection"
+            android:foregroundServiceType="dataSync"
             android:stopWithTask="true" />
 
-        <!-- Native Android Screen Streaming Helper Foreground Service (mediaProjection and dataSync for Android 14/15/16) -->
+        <!-- Native Android Screen Streaming Helper Foreground Service (mediaProjection type for Android 14/15/16) -->
         <service
             android:name=".ScreenCaptureService"
-            android:foregroundServiceType="mediaProjection|dataSync"
+            android:foregroundServiceType="mediaProjection"
             android:exported="false" />
 
         <meta-data
