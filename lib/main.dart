@@ -17,7 +17,7 @@ import 'dart:isolate';
 // -------------------------------------------------------------
 // SIGNALING CONFIGURATION & CLIENT
 // -------------------------------------------------------------
-const String kDefaultSignalingServer = 'https://ais-dev-6snjgczxe5mnz34fbgzs4p-751137797858.asia-east1.run.app';
+const String kDefaultSignalingServer = 'https://ais-pre-6snjgczxe5mnz34fbgzs4p-751137797858.asia-east1.run.app';
 
 class SignalingService {
   final String baseUrl;
@@ -50,7 +50,17 @@ class SignalingService {
     final payload = jsonEncode(payloadMap);
 
     for (final c in codes) {
-      // 1. JSON publish with explicit topic field
+      // 1. Send to Cloud Run server
+      try {
+        final uri = Uri.parse('$baseUrl/api/signal/room/$c/offer');
+        final request = await _client.postUrl(uri);
+        request.headers.contentType = ContentType.json;
+        request.write(payload);
+        final response = await request.close().timeout(const Duration(seconds: 2));
+        if (response.statusCode == 200) ok = true;
+      } catch (_) {}
+
+      // 2. JSON publish to ntfy
       try {
         final uri = Uri.parse('https://ntfy.sh');
         final request = await _client.postUrl(uri);
@@ -65,7 +75,7 @@ class SignalingService {
         debugPrint('ntfy sendOffer JSON ($c): $e');
       }
 
-      // 2. Direct topic path publish with raw text
+      // 3. Direct topic path publish with raw text
       try {
         final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_offer');
         final request = await _client.postUrl(uri);
@@ -84,6 +94,24 @@ class SignalingService {
   Future<Map<String, dynamic>?> getOffer(String roomCode, {int minTimestamp = 0}) async {
     final codes = _possibleCodes(roomCode);
     for (final c in codes) {
+      // 1. Try Cloud Run server first
+      try {
+        final uri = Uri.parse('$baseUrl/api/signal/room/$c/offer');
+        final request = await _client.getUrl(uri);
+        final response = await request.close().timeout(const Duration(seconds: 2));
+        if (response.statusCode == 200) {
+          final body = await response.transform(utf8.decoder).join();
+          final json = jsonDecode(body);
+          if (json is Map && json['sdp'] != null) {
+            final ts = json['timestamp'] as int? ?? 0;
+            if (ts >= minTimestamp) {
+              return Map<String, dynamic>.from(json);
+            }
+          }
+        }
+      } catch (_) {}
+
+      // 2. Fallback to ntfy.sh
       try {
         final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_offer/json?poll=1');
         final request = await _client.getUrl(uri);
@@ -213,6 +241,17 @@ class SignalingService {
     final payload = jsonEncode(payloadMap);
 
     for (final c in codes) {
+      // 1. Send to Cloud Run server
+      try {
+        final uri = Uri.parse('$baseUrl/api/signal/room/$c/answer');
+        final request = await _client.postUrl(uri);
+        request.headers.contentType = ContentType.json;
+        request.write(payload);
+        final response = await request.close().timeout(const Duration(seconds: 2));
+        if (response.statusCode == 200) ok = true;
+      } catch (_) {}
+
+      // 2. Publish to ntfy
       try {
         final uri = Uri.parse('https://ntfy.sh');
         final request = await _client.postUrl(uri);
@@ -238,9 +277,27 @@ class SignalingService {
     return ok;
   }
 
-  Future<Map<String, dynamic>?> getAnswer(String roomCode) async {
+  Future<Map<String, dynamic>?> getAnswer(String roomCode, {int minTimestamp = 0}) async {
     final codes = _possibleCodes(roomCode);
     for (final c in codes) {
+      // 1. Try Cloud Run server first
+      try {
+        final uri = Uri.parse('$baseUrl/api/signal/room/$c/answer?since=$minTimestamp');
+        final request = await _client.getUrl(uri);
+        final response = await request.close().timeout(const Duration(seconds: 2));
+        if (response.statusCode == 200) {
+          final body = await response.transform(utf8.decoder).join();
+          final json = jsonDecode(body);
+          if (json is Map && json['sdp'] != null) {
+            final ts = json['timestamp'] as int? ?? 0;
+            if (ts >= minTimestamp) {
+              return Map<String, dynamic>.from(json);
+            }
+          }
+        }
+      } catch (_) {}
+
+      // 2. Fallback to ntfy.sh
       try {
         final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_answer/json?poll=1');
         final request = await _client.getUrl(uri);
@@ -255,7 +312,10 @@ class SignalingService {
               if (json is Map && json['message'] != null) {
                 final payload = jsonDecode(json['message']);
                 if (payload is Map && payload['sdp'] != null) {
-                  return Map<String, dynamic>.from(payload);
+                  final ts = payload['timestamp'] as int? ?? 0;
+                  if (ts >= minTimestamp) {
+                    return Map<String, dynamic>.from(payload);
+                  }
                 }
               }
             } catch (_) {}
@@ -269,6 +329,22 @@ class SignalingService {
     return null;
   }
 
+  Future<void> resetRoom(String roomCode) async {
+    final codes = _possibleCodes(roomCode);
+    for (final c in codes) {
+      try {
+        final uri = Uri.parse('$baseUrl/api/signal/room/$c/reset');
+        final request = await _client.postUrl(uri);
+        await request.close().timeout(const Duration(seconds: 2));
+      } catch (_) {}
+      try {
+        final uri = Uri.parse('$baseUrl/api/signal/room/$c/stop');
+        final request = await _client.postUrl(uri);
+        await request.close().timeout(const Duration(seconds: 2));
+      } catch (_) {}
+    }
+  }
+
   Future<bool> sendCandidate(
     String roomCode,
     String candidate,
@@ -277,15 +353,26 @@ class SignalingService {
     String sender,
   ) async {
     final codes = _possibleCodes(roomCode);
-    final payload = jsonEncode({
+    final payloadMap = {
       'candidate': candidate,
       'sdpMid': sdpMid,
       'sdpMLineIndex': sdpMLineIndex,
       'sender': sender,
       'timestamp': DateTime.now().millisecondsSinceEpoch,
-    });
+    };
+    final payload = jsonEncode(payloadMap);
 
     for (final c in codes) {
+      // 1. Send to server
+      try {
+        final uri = Uri.parse('$baseUrl/api/signal/room/$c/candidate');
+        final request = await _client.postUrl(uri);
+        request.headers.contentType = ContentType.json;
+        request.write(payload);
+        await request.close().timeout(const Duration(seconds: 2));
+      } catch (_) {}
+
+      // 2. Publish to ntfy
       try {
         final topic = 'kg_signal_${c}_cand_$sender';
         final uri = Uri.parse('https://ntfy.sh');
@@ -321,6 +408,27 @@ class SignalingService {
     final List<Map<String, dynamic>> results = [];
 
     for (final c in codes) {
+      // 1. Try server first
+      try {
+        final uri = Uri.parse('$baseUrl/api/signal/room/$c/candidates?for=$forRole&since=$sinceTimestamp');
+        final request = await _client.getUrl(uri);
+        final response = await request.close().timeout(const Duration(seconds: 2));
+        if (response.statusCode == 200) {
+          final body = await response.transform(utf8.decoder).join();
+          final json = jsonDecode(body);
+          if (json is Map && json['candidates'] is List) {
+            for (final cand in json['candidates']) {
+              if (cand is Map && cand['candidate'] != null) {
+                results.add(Map<String, dynamic>.from(cand));
+              }
+            }
+          }
+        }
+      } catch (_) {}
+
+      if (results.isNotEmpty) return results;
+
+      // 2. Fallback to ntfy
       try {
         final topic = 'kg_signal_${c}_cand_$targetSender';
         final uri = Uri.parse('https://ntfy.sh/$topic/json?poll=1');
@@ -1008,6 +1116,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
   final List<Map<String, dynamic>> _collectedChildCandidates = [];
   String? _latestOfferSdp;
   String? _latestOfferType;
+  int _offerTimestamp = 0;
 
   final Map<String, dynamic> _iceServers = {
     'iceServers': [
@@ -1146,7 +1255,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         if (mounted) {
           setState(() {
             _isParentConnected = false;
-            _statusMessage = 'माता-पिता का फोन डिस्कनेक्ट हो गया। पुनः जुड़ने की प्रतीक्षा...';
+            _statusMessage = 'माता-पिता डिस्कनेक्ट हो गए। पुनः जुड़ने की प्रतीक्षा...';
           });
         }
         // Auto-recycle peer connection with active screen stream so parent can reconnect immediately!
@@ -1212,8 +1321,9 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       await _peerConnection!.setLocalDescription(offer);
       _latestOfferSdp = offer.sdp;
       _latestOfferType = offer.type;
+      _offerTimestamp = DateTime.now().millisecondsSinceEpoch;
 
-      _startPollingForAnswer(roomCode);
+      _startPollingForAnswer(roomCode, _offerTimestamp);
       _signaling.sendOffer(roomCode, offer.sdp!, offer.type!);
 
       if (mounted) {
@@ -1268,6 +1378,15 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         _statusMessage = 'अनुमतियां जांच रहे हैं...';
       });
 
+      // Reset stale session signaling
+      _latestOfferSdp = null;
+      _latestOfferType = null;
+      _lastHandledReqTimestamp = 0;
+      _lastHandledDisconnectTimestamp = 0;
+      _isRemoteDescSet = false;
+      _isParentConnected = false;
+      await _signaling.resetRoom(roomCode);
+
       try {
         await Permission.notification.request();
         await [Permission.camera, Permission.microphone].request();
@@ -1308,7 +1427,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
 
       stream.getVideoTracks().forEach((track) {
         track.onEnded = () {
-          debugPrint('Screen capture track ended');
+          debugPrint('Screen capture track ended (system notification stop)');
           if (mounted) {
             _stopScreenShare();
           }
@@ -1349,6 +1468,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       await _peerConnection!.setLocalDescription(offer);
       _latestOfferSdp = offer.sdp;
       _latestOfferType = offer.type;
+      _offerTimestamp = DateTime.now().millisecondsSinceEpoch;
 
       setState(() {
         _isSharing = true;
@@ -1394,8 +1514,8 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       // Start action polling on Cloud Relay
       _startPollingForActions(roomCode);
 
-      // 2. Poll for Parent's Answer on Cloud Relay
-      _startPollingForAnswer(roomCode);
+      // 2. Poll for Parent's Answer on Cloud Relay (Strictly only accept fresh answer created for this offer!)
+      _startPollingForAnswer(roomCode, _offerTimestamp);
 
       // 3. Listen for reconnection/offer requests from Parent
       _startListeningForReconnectRequests(roomCode);
@@ -1439,13 +1559,13 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
     }
   }
 
-  // Listen / Poll for Parent's Answer
-  void _startPollingForAnswer(String roomCode) {
+  // Listen / Poll for Parent's Answer (Strictly validates freshness with forOfferTimestamp)
+  void _startPollingForAnswer(String roomCode, int forOfferTimestamp) {
     _answerPollTimer?.cancel();
     _answerPollTimer = Timer.periodic(const Duration(seconds: 1), (timer) async {
       if (!_isSharing || _isRemoteDescSet || _peerConnection == null) return;
 
-      final answerData = await _signaling.getAnswer(roomCode);
+      final answerData = await _signaling.getAnswer(roomCode, minTimestamp: forOfferTimestamp - 1000);
       if (answerData != null && answerData['sdp'] != null && !_isRemoteDescSet) {
         _isRemoteDescSet = true;
         timer.cancel();
@@ -1513,7 +1633,9 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
 
   void _stopScreenShare() async {
     _answerPollTimer?.cancel();
+    _answerPollTimer = null;
     _candidatePollTimer?.cancel();
+    _candidatePollTimer = null;
     _offerHeartbeatTimer?.cancel();
     _offerHeartbeatTimer = null;
     _reconnectListenTimer?.cancel();
@@ -1524,6 +1646,21 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
     _actionFeedbackTimer = null;
     _localLan.stop();
     _collectedChildCandidates.clear();
+
+    final roomCode = _codeController.text.trim().toUpperCase();
+    if (roomCode.isNotEmpty) {
+      _signaling.sendDisconnect(roomCode);
+      _signaling.resetRoom(roomCode);
+    }
+
+    _latestOfferSdp = null;
+    _latestOfferType = null;
+    _offerTimestamp = 0;
+    _lastHandledReqTimestamp = 0;
+    _lastHandledDisconnectTimestamp = 0;
+    _lastCandidateTimestamp = 0;
+    _isRemoteDescSet = false;
+    _isParentConnected = false;
 
     try {
       await _platformChannel.invokeMethod('stopScreenCapture');
@@ -1551,7 +1688,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         _isSharing = false;
         _isParentConnected = false;
         _isRemoteDescSet = false;
-        _statusMessage = 'स्क्रीन शेयरिंग बंद है।';
+        _statusMessage = 'स्क्रीन शेयरिंग बंद है।\n(नोटिफिकेशन या सिस्टम से बंद की गई - दोबारा कनेक्ट करने के लिए नीचे बटन दबाएं)';
       });
     }
   }
@@ -2080,6 +2217,11 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
           _statusText = 'बच्चे के फोन से सिग्नल खोज रहे हैं... ($attempt/40)';
         });
 
+        // Re-request fresh offer every 3 attempts to wake up backgrounded child
+        if (attempt % 3 == 0) {
+          _signaling.requestFreshOffer(roomCode, DateTime.now().millisecondsSinceEpoch);
+        }
+
         // 1. Direct Wi-Fi LAN search (Instant <200ms when both phones are on same Wi-Fi)
         try {
           final lanOffer = await _localLan.discoverOnLan(roomCode, requestFresh: attempt == 1 || attempt % 3 == 0);
@@ -2091,11 +2233,21 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
           }
         } catch (_) {}
 
-        // 2. Cloud Relay search (ntfy.sh) - only accepts fresh offer generated around or after this connection attempt
-        offerData = await _signaling.getOffer(roomCode, minTimestamp: reqTimestamp - 3000);
+        // 2. Cloud Relay search (server.ts + ntfy.sh)
+        // First 3 attempts: check for fresh offer generated around or after this connection attempt
+        offerData = await _signaling.getOffer(roomCode, minTimestamp: reqTimestamp - 5000);
         if (offerData != null && offerData['sdp'] != null && (offerData['sdp'] as String).isNotEmpty) {
-          debugPrint("🎯 [Parent] Discovered Child via Cloud Relay!");
+          debugPrint("🎯 [Parent] Discovered Child via Cloud Relay (Fresh Offer)!");
           break;
+        }
+
+        // From attempt 4+: Also accept running offer from past 60s if child is already broadcasting
+        if (attempt >= 4) {
+          offerData = await _signaling.getOffer(roomCode, minTimestamp: reqTimestamp - 60000);
+          if (offerData != null && offerData['sdp'] != null && (offerData['sdp'] as String).isNotEmpty) {
+            debugPrint("🎯 [Parent] Discovered Child via Cloud Relay (Active Running Offer)!");
+            break;
+          }
         }
 
         await Future.delayed(const Duration(milliseconds: 1000));

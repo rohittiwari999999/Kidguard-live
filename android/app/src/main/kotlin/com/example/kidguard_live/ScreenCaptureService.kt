@@ -68,7 +68,19 @@ class ScreenCaptureService : Service() {
                         activeMediaProjection?.registerCallback(object : MediaProjection.Callback() {
                             override fun onStop() {
                                 super.onStop()
+                                Log.d("ScreenCaptureService", "MediaProjection stopped by system notification or user action")
                                 activeMediaProjection = null
+                                try {
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                                        stopForeground(STOP_FOREGROUND_REMOVE)
+                                    } else {
+                                        @Suppress("DEPRECATION")
+                                        stopForeground(true)
+                                    }
+                                    stopSelf()
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                }
                             }
                         }, Handler(Looper.getMainLooper()))
                         Log.d("ScreenCaptureService", "MediaProjection successfully acquired")
