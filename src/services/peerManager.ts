@@ -62,7 +62,9 @@ export class PeerManager {
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
           { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' }
+          { urls: 'stun:stun2.l.google.com:19302' },
+          { urls: 'stun:stun.cloudflare.com:3478' },
+          { urls: 'stun:stun.relay.metered.ca:80' }
         ]
       },
       debug: 0 // Suppress noisy PeerJS internal console warnings for offline peers
@@ -302,6 +304,7 @@ export class PeerManager {
   private isHttpRemoteDescSet = false;
   private queuedCandidates: RTCIceCandidate[] = [];
   private lastCandidateTs = 0;
+  private addedCandidateKeys = new Set<string>();
 
   private cleanCode(code: string): string {
     return code.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -318,6 +321,8 @@ export class PeerManager {
           { urls: 'stun:stun.l.google.com:19302' },
           { urls: 'stun:stun1.l.google.com:19302' },
           { urls: 'stun:stun2.l.google.com:19302' },
+          { urls: 'stun:stun.cloudflare.com:3478' },
+          { urls: 'stun:stun.relay.metered.ca:80' },
         ],
       });
 
@@ -373,7 +378,7 @@ export class PeerManager {
           let answerData: any = null;
           // Try ntfy first
           try {
-            const ntfyRes = await fetch(`https://ntfy.sh/kg_signal_${clean}_answer/json?poll=1`);
+            const ntfyRes = await fetch(`https://ntfy.sh/kg_signal_${clean}_answer/json?poll=1&since=2m`);
             if (ntfyRes.ok) {
               const text = await ntfyRes.text();
               const lines = text.trim().split('\n');
@@ -433,13 +438,14 @@ export class PeerManager {
     const codes = this.possibleCodes(roomCode);
     const rawCode = roomCode.trim().toUpperCase();
     const watchStartTime = Date.now();
+    const reqId = `req_${watchStartTime}_${Math.floor(Math.random() * 100000)}`;
 
     // Notify child device to prepare fresh offer for this parent
     for (const c of codes) {
       fetch(`https://ntfy.sh/kg_signal_${c}_req`, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain' },
-        body: JSON.stringify({ request: 'offer', timestamp: watchStartTime }),
+        body: JSON.stringify({ request: 'offer', reqId, timestamp: watchStartTime }),
       }).catch(() => {});
     }
 
@@ -450,23 +456,22 @@ export class PeerManager {
         let offerData: any = null;
 
         // Re-request offer periodically
-        if (attempt % 3 === 0) {
+        if (attempt % 5 === 0) {
           for (const c of codes) {
             fetch(`https://ntfy.sh/kg_signal_${c}_req`, {
               method: 'POST',
               headers: { 'Content-Type': 'text/plain' },
-              body: JSON.stringify({ request: 'offer', timestamp: Date.now() }),
+              body: JSON.stringify({ request: 'offer', reqId, timestamp: Date.now() }),
             }).catch(() => {});
           }
         }
 
-        const minTs = attempt < 4 ? watchStartTime - 5000 : watchStartTime - 60000;
-
-        // 1. Try fetching offer from ntfy.sh (checks all code variants)
+        // 1. Try fetching offer from ntfy.sh using server-side 2m window & reqId matching
+        let fallbackOffer: any = null;
         for (const c of codes) {
           if (offerData?.sdp) break;
           try {
-            const ntfyRes = await fetch(`https://ntfy.sh/kg_signal_${c}_offer/json?poll=1`);
+            const ntfyRes = await fetch(`https://ntfy.sh/kg_signal_${c}_offer/json?poll=1&since=2m`);
             if (ntfyRes.ok) {
               const text = await ntfyRes.text();
               const lines = text.trim().split('\n');
@@ -476,9 +481,14 @@ export class PeerManager {
                   const parsed = JSON.parse(line);
                   if (parsed.message) {
                     const inner = JSON.parse(parsed.message);
-                    if (inner.sdp && (!inner.timestamp || inner.timestamp >= minTs)) {
-                      offerData = inner;
-                      break;
+                    if (inner.sdp) {
+                      if (inner.replyToReqId === reqId) {
+                        offerData = inner;
+                        break;
+                      }
+                      if (!fallbackOffer && attempt > 4) {
+                        fallbackOffer = inner;
+                      }
                     }
                   }
                 } catch {}
@@ -487,6 +497,9 @@ export class PeerManager {
           } catch (e) {
             console.warn('ntfy poll offer error:', e);
           }
+        }
+        if (!offerData?.sdp && fallbackOffer?.sdp) {
+          offerData = fallbackOffer;
         }
 
         // 2. Fallback to local server
@@ -497,7 +510,7 @@ export class PeerManager {
               const localRes = await fetch(`/api/signal/room/${c}/offer`);
               if (localRes.ok) {
                 const data = await localRes.json();
-                if (data?.sdp && (!data.timestamp || data.timestamp >= minTs)) offerData = data;
+                if (data?.sdp) offerData = data;
               }
             } catch {}
           }
@@ -510,6 +523,8 @@ export class PeerManager {
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
             { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun.cloudflare.com:3478' },
+            { urls: 'stun:stun.relay.metered.ca:80' },
           ],
         });
 
@@ -538,26 +553,21 @@ export class PeerManager {
 
         this.httpPc.onicecandidate = (event) => {
           if (event.candidate) {
-            const candPayload = {
+            const candPayload: Record<string, any> = {
               candidate: event.candidate.candidate,
               sdpMid: event.candidate.sdpMid,
               sdpMLineIndex: event.candidate.sdpMLineIndex,
               sender: 'parent',
               timestamp: Date.now(),
             };
+            if (offerData.offerId) {
+              candPayload.offerId = offerData.offerId;
+            }
             for (const c of codes) {
               fetch(`https://ntfy.sh/kg_signal_${c}_cand_parent`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'text/plain' },
                 body: JSON.stringify(candPayload),
-              }).catch(() => {});
-              fetch('https://ntfy.sh', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  topic: `kg_signal_${c}_cand_parent`,
-                  message: JSON.stringify(candPayload),
-                }),
               }).catch(() => {});
             }
             fetch(`/api/signal/room/${rawCode}/candidate`, {
@@ -574,21 +584,20 @@ export class PeerManager {
         const answer = await this.httpPc.createAnswer();
         await this.httpPc.setLocalDescription(answer);
 
-        const answerPayload = { sdp: answer.sdp, type: answer.type, timestamp: Date.now() };
+        const answerPayload: Record<string, any> = {
+          sdp: answer.sdp,
+          type: answer.type,
+          timestamp: Date.now(),
+        };
+        if (offerData.offerId) {
+          answerPayload.offerId = offerData.offerId;
+        }
 
         for (const c of codes) {
           fetch(`https://ntfy.sh/kg_signal_${c}_answer`, {
             method: 'POST',
             headers: { 'Content-Type': 'text/plain' },
             body: JSON.stringify(answerPayload),
-          }).catch(() => {});
-          fetch('https://ntfy.sh', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              topic: `kg_signal_${c}_answer`,
-              message: JSON.stringify(answerPayload),
-            }),
           }).catch(() => {});
         }
 
@@ -598,7 +607,7 @@ export class PeerManager {
           body: JSON.stringify(answerPayload),
         }).catch(() => {});
 
-        this.startListeningToCandidates(roomCode, 'parent');
+        this.startListeningToCandidates(roomCode, 'parent', offerData.offerId);
         return true;
       } catch (err) {
         console.warn('HTTP Parent Watch attempt failed:', err);
@@ -621,17 +630,32 @@ export class PeerManager {
     }
   }
 
-  private startListeningToCandidates(roomCode: string, forRole: 'kid' | 'parent') {
+  private startListeningToCandidates(roomCode: string, forRole: 'kid' | 'parent', expectedOfferId?: string) {
     const clean = this.cleanCode(roomCode);
     const rawCode = roomCode.trim().toUpperCase();
     const targetSender = forRole === 'kid' ? 'parent' : 'kid';
 
+    const pushCandidate = async (item: any) => {
+      if (!item?.candidate || this.addedCandidateKeys.has(item.candidate) || !this.httpPc) return;
+      this.addedCandidateKeys.add(item.candidate);
+      const candidate = new RTCIceCandidate({
+        candidate: item.candidate,
+        sdpMid: item.sdpMid,
+        sdpMLineIndex: item.sdpMLineIndex,
+      });
+      if (this.isHttpRemoteDescSet) {
+        await this.httpPc.addIceCandidate(candidate).catch(() => {});
+      } else {
+        this.queuedCandidates.push(candidate);
+      }
+    };
+
     this.httpCandidateTimer = setInterval(async () => {
       if (!this.httpPc) return;
       try {
-        // 1. Fetch from ntfy
+        // 1. Fetch from ntfy (supports both batched Flutter candidates and single candidates)
         try {
-          const ntfyRes = await fetch(`https://ntfy.sh/kg_signal_${clean}_cand_${targetSender}/json?poll=1`);
+          const ntfyRes = await fetch(`https://ntfy.sh/kg_signal_${clean}_cand_${targetSender}/json?poll=1&since=2m`);
           if (ntfyRes.ok) {
             const text = await ntfyRes.text();
             const lines = text.trim().split('\n');
@@ -641,18 +665,15 @@ export class PeerManager {
                 const parsed = JSON.parse(line);
                 if (parsed.message) {
                   const inner = JSON.parse(parsed.message);
-                  if (inner.candidate && (inner.timestamp || 0) > this.lastCandidateTs) {
-                    this.lastCandidateTs = inner.timestamp || Date.now();
-                    const candidate = new RTCIceCandidate({
-                      candidate: inner.candidate,
-                      sdpMid: inner.sdpMid,
-                      sdpMLineIndex: inner.sdpMLineIndex,
-                    });
-                    if (this.isHttpRemoteDescSet) {
-                      await this.httpPc.addIceCandidate(candidate).catch(() => {});
-                    } else {
-                      this.queuedCandidates.push(candidate);
+                  if (expectedOfferId && inner.offerId && inner.offerId !== expectedOfferId) {
+                    continue;
+                  }
+                  if (Array.isArray(inner.candidates)) {
+                    for (const item of inner.candidates) {
+                      await pushCandidate(item);
                     }
+                  } else if (inner.candidate) {
+                    await pushCandidate(inner);
                   }
                 }
               } catch {}
@@ -669,18 +690,7 @@ export class PeerManager {
               if (item.timestamp > this.lastCandidateTs) {
                 this.lastCandidateTs = item.timestamp;
               }
-              if (item.candidate) {
-                const candidate = new RTCIceCandidate({
-                  candidate: item.candidate,
-                  sdpMid: item.sdpMid,
-                  sdpMLineIndex: item.sdpMLineIndex,
-                });
-                if (this.isHttpRemoteDescSet) {
-                  await this.httpPc.addIceCandidate(candidate).catch(() => {});
-                } else {
-                  this.queuedCandidates.push(candidate);
-                }
-              }
+              await pushCandidate(item);
             }
           }
         }
@@ -696,6 +706,7 @@ export class PeerManager {
     this.isHttpRemoteDescSet = false;
     this.queuedCandidates = [];
     this.lastCandidateTs = 0;
+    this.addedCandidateKeys.clear();
     if (this.httpPc) {
       try {
         this.httpPc.close();

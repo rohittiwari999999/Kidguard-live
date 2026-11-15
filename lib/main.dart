@@ -2,7 +2,7 @@
 // KidGuard Live - Full Flutter Mobile Application
 // Real-time Child Screen Monitoring via WebRTC & Foreground Service MediaProjection
 // Android 13/14/15/16 Compatible with complete Signaling, ICE Candidate Queueing,
-// Unified Plan track fallback, and full code editing on Kid & Parent devices.
+// Unified Plan track fallback, TURN Relay support, and background WakeLock/WifiLock persistence.
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -13,19 +13,156 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:math' show Random;
 
 // -------------------------------------------------------------
-// SIGNALING CONFIGURATION & CLIENT
+// ICE / STUN / TURN CONFIGURATION SERVICE (Mobile Data CGNAT Fix)
 // -------------------------------------------------------------
-const String kDefaultSignalingServer = 'https://ais-dev-6snjgczxe5mnz34fbgzs4p-751137797858.asia-east1.run.app';
+class IceConfigService {
+  static final Random _rng = Random();
+
+  static String generateId(String prefix) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final r = _rng.nextInt(999999);
+    return '${prefix}_${now}_$r';
+  }
+
+  static File _configFile() => File('${Directory.systemTemp.path}/kidguard_turn_cfg.json');
+
+  static Future<Map<String, String>> loadSettings() async {
+    try {
+      final f = _configFile();
+      if (await f.exists()) {
+        final raw = await f.readAsString();
+        final map = jsonDecode(raw);
+        if (map is Map) {
+          return {
+            'meteredUrl': (map['meteredUrl'] ?? '').toString(),
+            'turnUrl': (map['turnUrl'] ?? '').toString(),
+            'username': (map['username'] ?? '').toString(),
+            'credential': (map['credential'] ?? '').toString(),
+          };
+        }
+      }
+    } catch (_) {}
+    return {'meteredUrl': '', 'turnUrl': '', 'username': '', 'credential': ''};
+  }
+
+  static Future<void> saveSettings({
+    String meteredUrl = '',
+    String turnUrl = '',
+    String username = '',
+    String credential = '',
+  }) async {
+    try {
+      final f = _configFile();
+      await f.writeAsString(jsonEncode({
+        'meteredUrl': meteredUrl.trim(),
+        'turnUrl': turnUrl.trim(),
+        'username': username.trim(),
+        'credential': credential.trim(),
+      }));
+    } catch (_) {}
+  }
+
+  static Future<bool> hasTurnConfigured() async {
+    final s = await loadSettings();
+    return (s['meteredUrl'] ?? '').isNotEmpty || (s['turnUrl'] ?? '').isNotEmpty;
+  }
+
+  static Future<List<Map<String, dynamic>>> getCustomTurnServers() async {
+    final List<Map<String, dynamic>> turnServers = [];
+    final cfg = await loadSettings();
+    final meteredUrl = (cfg['meteredUrl'] ?? '').trim();
+    final manualTurn = (cfg['turnUrl'] ?? '').trim();
+    final user = (cfg['username'] ?? '').trim();
+    final cred = (cfg['credential'] ?? '').trim();
+
+    if (meteredUrl.isNotEmpty) {
+      try {
+        final client = HttpClient()
+          ..connectionTimeout = const Duration(seconds: 4)
+          ..badCertificateCallback = ((X509Certificate cert, String host, int port) => true);
+        final req = await client.getUrl(Uri.parse(meteredUrl));
+        final resp = await req.close().timeout(const Duration(seconds: 4));
+        if (resp.statusCode == 200) {
+          final body = await resp.transform(utf8.decoder).join().timeout(const Duration(seconds: 4));
+          final decoded = jsonDecode(body);
+          if (decoded is List) {
+            for (final item in decoded) {
+              if (item is Map) {
+                turnServers.add(Map<String, dynamic>.from(item));
+              }
+            }
+          }
+        } else {
+          await resp.drain<void>();
+        }
+        client.close();
+      } catch (e) {
+        debugPrint('Metered TURN fetch notice: $e');
+      }
+    }
+
+    if (manualTurn.isNotEmpty) {
+      final entry = <String, dynamic>{'urls': manualTurn};
+      if (user.isNotEmpty) entry['username'] = user;
+      if (cred.isNotEmpty) entry['credential'] = cred;
+      turnServers.add(entry);
+    }
+
+    return turnServers;
+  }
+
+  static Future<Map<String, dynamic>> buildIceConfig({
+    List<Map<String, dynamic>>? extraTurnServers,
+  }) async {
+    final List<Map<String, dynamic>> servers = [
+      {'urls': 'stun:stun.l.google.com:19302'},
+      {'urls': 'stun:stun1.l.google.com:19302'},
+      {'urls': 'stun:stun.cloudflare.com:3478'},
+      {'urls': 'stun:stun.relay.metered.ca:80'},
+    ];
+
+    final localTurns = await getCustomTurnServers();
+    servers.addAll(localTurns);
+
+    if (extraTurnServers != null && extraTurnServers.isNotEmpty) {
+      for (final t in extraTurnServers) {
+        if (t['urls'] != null) {
+          servers.add(Map<String, dynamic>.from(t));
+        }
+      }
+    }
+
+    return {
+      'iceServers': servers,
+      'sdpSemantics': 'unified-plan',
+      'bundlePolicy': 'max-bundle',
+      'rtcpMuxPolicy': 'require',
+      'iceCandidatePoolSize': 4,
+    };
+  }
+}
+
+// -------------------------------------------------------------
+// SIGNALING CONFIGURATION & CLIENT (ntfy.sh Cloud + Optional Server)
+// -------------------------------------------------------------
+const String kDefaultSignalingServer = '';
 
 class SignalingService {
   final String baseUrl;
+  bool _serverDisabled = false;
   final HttpClient _client = HttpClient()
-    ..connectionTimeout = const Duration(seconds: 4)
+    ..connectionTimeout = const Duration(seconds: 5)
+    ..maxConnectionsPerHost = 12
     ..badCertificateCallback = ((X509Certificate cert, String host, int port) => true);
 
-  SignalingService({this.baseUrl = kDefaultSignalingServer});
+  SignalingService({this.baseUrl = kDefaultSignalingServer}) {
+    if (baseUrl.trim().isEmpty) {
+      _serverDisabled = true;
+    }
+  }
 
   String _cleanCode(String code) {
     return code.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '').toLowerCase();
@@ -37,236 +174,246 @@ class SignalingService {
     if (clean.startsWith('kid')) {
       final numPart = clean.substring(3);
       if (numPart.isNotEmpty) codes.add(numPart);
-    } else {
+    } else if (clean.isNotEmpty) {
       codes.add('kid$clean');
     }
     return codes.toList();
   }
 
-  Future<bool> sendOffer(String roomCode, String sdp, String type) async {
+  Future<bool> _postNtfy(String topic, String payload) async {
+    try {
+      final uri = Uri.parse('https://ntfy.sh/$topic');
+      final request = await _client.postUrl(uri);
+      request.headers.contentType = ContentType.text;
+      request.write(payload);
+      final response = await request.close().timeout(const Duration(seconds: 4));
+      await response.drain<void>().timeout(const Duration(seconds: 2), onTimeout: () {});
+      if (response.statusCode == 200) return true;
+      debugPrint('ntfy POST $topic HTTP ${response.statusCode}');
+    } catch (e) {
+      debugPrint('ntfy POST $topic error: $e');
+    }
+    return false;
+  }
+
+  Future<List<Map<String, dynamic>>> _getNtfyMessages(String topic, {String since = '2m'}) async {
+    final List<Map<String, dynamic>> out = [];
+    try {
+      final uri = Uri.parse('https://ntfy.sh/$topic/json?poll=1&since=$since');
+      final request = await _client.getUrl(uri);
+      final response = await request.close().timeout(const Duration(seconds: 4));
+      if (response.statusCode == 200) {
+        final body = await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 4));
+        final lines = body.trim().split('\n');
+        for (final line in lines) {
+          if (line.trim().isEmpty) continue;
+          try {
+            final json = jsonDecode(line);
+            if (json is Map && json['message'] != null) {
+              final payload = jsonDecode(json['message'].toString());
+              if (payload is Map) {
+                out.add({
+                  'ntfyId': json['id']?.toString() ?? '',
+                  'ntfyTime': json['time'] as int? ?? 0,
+                  'payload': Map<String, dynamic>.from(payload),
+                });
+              }
+            }
+          } catch (_) {}
+        }
+      } else {
+        await response.drain<void>().timeout(const Duration(seconds: 2), onTimeout: () {});
+        debugPrint('ntfy GET $topic HTTP ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('ntfy GET $topic error: $e');
+    }
+    return out;
+  }
+
+  Future<bool> sendOffer(
+    String roomCode,
+    String sdp,
+    String type, {
+    String? offerId,
+    String? replyToReqId,
+    List<Map<String, dynamic>>? turnServers,
+  }) async {
     final codes = _possibleCodes(roomCode);
     bool ok = false;
-    final payloadMap = {'sdp': sdp, 'type': type, 'timestamp': DateTime.now().millisecondsSinceEpoch};
+    final payloadMap = <String, dynamic>{
+      'sdp': sdp,
+      'type': type,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      if (offerId != null) 'offerId': offerId,
+      if (replyToReqId != null) 'replyToReqId': replyToReqId,
+      if (turnServers != null && turnServers.isNotEmpty) 'turnServers': turnServers,
+    };
     final payload = jsonEncode(payloadMap);
 
     for (final c in codes) {
-      // 1. JSON publish with explicit topic field
-      try {
-        final uri = Uri.parse('https://ntfy.sh');
-        final request = await _client.postUrl(uri);
-        request.headers.contentType = ContentType.json;
-        request.write(jsonEncode({
-          'topic': 'kg_signal_${c}_offer',
-          'message': payload,
-        }));
-        final response = await request.close().timeout(const Duration(seconds: 3));
-        if (response.statusCode == 200) ok = true;
-      } catch (e) {
-        debugPrint('ntfy sendOffer JSON ($c): $e');
-      }
-
-      // 2. Direct topic path publish with raw text
-      try {
-        final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_offer');
-        final request = await _client.postUrl(uri);
-        request.headers.contentType = ContentType.text;
-        request.write(payload);
-        final response = await request.close().timeout(const Duration(seconds: 3));
-        if (response.statusCode == 200) ok = true;
-      } catch (e) {
-        debugPrint('ntfy sendOffer text ($c): $e');
+      if (await _postNtfy('kg_signal_${c}_offer', payload)) {
+        ok = true;
       }
     }
-
     return ok;
   }
 
-  Future<Map<String, dynamic>?> getOffer(String roomCode, {int minTimestamp = 0}) async {
+  Future<Map<String, dynamic>?> getOffer(
+    String roomCode, {
+    String? reqId,
+    bool requireMatchingReqId = false,
+    Set<String>? excludeOfferIds,
+  }) async {
     final codes = _possibleCodes(roomCode);
+    Map<String, dynamic>? bestFallback;
+
     for (final c in codes) {
-      try {
-        final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_offer/json?poll=1');
-        final request = await _client.getUrl(uri);
-        final response = await request.close().timeout(const Duration(seconds: 3));
-        if (response.statusCode == 200) {
-          final body = await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 3));
-          final lines = body.trim().split('\n');
-          for (final line in lines.reversed) {
-            if (line.trim().isEmpty) continue;
-            try {
-              final json = jsonDecode(line);
-              if (json is Map && json['message'] != null) {
-                final msgStr = json['message'].toString();
-                final payload = jsonDecode(msgStr);
-                if (payload is Map && payload['sdp'] != null) {
-                  final ts = payload['timestamp'] as int? ?? 0;
-                  if (ts >= minTimestamp) {
-                    return Map<String, dynamic>.from(payload);
-                  }
-                }
-              }
-            } catch (_) {}
-          }
+      final msgs = await _getNtfyMessages('kg_signal_${c}_offer', since: '2m');
+      for (final m in msgs.reversed) {
+        final payload = m['payload'] as Map<String, dynamic>;
+        if (payload['sdp'] == null) continue;
+        final oId = payload['offerId']?.toString();
+        if (oId != null && excludeOfferIds != null && excludeOfferIds.contains(oId)) {
+          continue;
         }
-      } catch (e) {
-        debugPrint('ntfy getOffer ($c): $e');
+        if (reqId != null && payload['replyToReqId']?.toString() == reqId) {
+          return payload;
+        }
+        if (!requireMatchingReqId) {
+          bestFallback ??= payload;
+        }
       }
     }
-
-    return null;
+    return requireMatchingReqId ? null : bestFallback;
   }
 
-  Future<void> requestFreshOffer(String roomCode, int reqTimestamp) async {
+  Future<void> requestFreshOffer(
+    String roomCode,
+    int reqTimestamp, {
+    String? reqId,
+    List<Map<String, dynamic>>? turnServers,
+  }) async {
     final codes = _possibleCodes(roomCode);
-    final payload = jsonEncode({'request': 'offer', 'timestamp': reqTimestamp});
+    final payload = jsonEncode({
+      'request': 'offer',
+      'timestamp': reqTimestamp,
+      if (reqId != null) 'reqId': reqId,
+      if (turnServers != null && turnServers.isNotEmpty) 'turnServers': turnServers,
+    });
     for (final c in codes) {
-      try {
-        final uri = Uri.parse('https://ntfy.sh');
-        final request = await _client.postUrl(uri);
-        request.headers.contentType = ContentType.json;
-        request.write(jsonEncode({
-          'topic': 'kg_signal_${c}_req',
-          'message': payload,
-        }));
-        await request.close().timeout(const Duration(seconds: 2));
-      } catch (_) {}
+      await _postNtfy('kg_signal_${c}_req', payload);
     }
   }
 
-  Future<int?> getLatestRequestTimestamp(String roomCode) async {
+  Future<Map<String, dynamic>?> getLatestRequest(String roomCode) async {
     final codes = _possibleCodes(roomCode);
     for (final c in codes) {
-      try {
-        final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_req/json?poll=1');
-        final request = await _client.getUrl(uri);
-        final response = await request.close().timeout(const Duration(seconds: 2));
-        if (response.statusCode == 200) {
-          final body = await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 2));
-          final lines = body.trim().split('\n');
-          for (final line in lines.reversed) {
-            if (line.trim().isEmpty) continue;
-            try {
-              final json = jsonDecode(line);
-              if (json is Map && json['message'] != null) {
-                final payload = jsonDecode(json['message']);
-                if (payload is Map && payload['timestamp'] != null) {
-                  return payload['timestamp'] as int;
-                }
-              }
-            } catch (_) {}
-          }
+      final msgs = await _getNtfyMessages('kg_signal_${c}_req', since: '35s');
+      for (final m in msgs.reversed) {
+        final payload = m['payload'] as Map<String, dynamic>;
+        if (payload['timestamp'] != null || payload['reqId'] != null) {
+          return {
+            ...payload,
+            '_ntfyId': m['ntfyId'],
+            '_ntfyTime': m['ntfyTime'],
+          };
         }
-      } catch (_) {}
+      }
     }
     return null;
   }
 
-  Future<void> sendDisconnect(String roomCode) async {
+  Future<void> sendDisconnect(String roomCode, {String? offerId}) async {
     final codes = _possibleCodes(roomCode);
-    final payload = jsonEncode({'event': 'disconnect', 'timestamp': DateTime.now().millisecondsSinceEpoch});
+    final payload = jsonEncode({
+      'event': 'disconnect',
+      'disconnectId': IceConfigService.generateId('disc'),
+      if (offerId != null) 'offerId': offerId,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+    });
     for (final c in codes) {
-      try {
-        final uri = Uri.parse('https://ntfy.sh');
-        final request = await _client.postUrl(uri);
-        request.headers.contentType = ContentType.json;
-        request.write(jsonEncode({
-          'topic': 'kg_signal_${c}_disconnect',
-          'message': payload,
-        }));
-        await request.close().timeout(const Duration(seconds: 2));
-      } catch (_) {}
+      await _postNtfy('kg_signal_${c}_disconnect', payload);
     }
   }
 
-  Future<int?> getLatestDisconnectTimestamp(String roomCode) async {
+  Future<Map<String, dynamic>?> getLatestDisconnect(String roomCode) async {
     final codes = _possibleCodes(roomCode);
     for (final c in codes) {
-      try {
-        final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_disconnect/json?poll=1');
-        final request = await _client.getUrl(uri);
-        final response = await request.close().timeout(const Duration(seconds: 2));
-        if (response.statusCode == 200) {
-          final body = await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 2));
-          final lines = body.trim().split('\n');
-          for (final line in lines.reversed) {
-            if (line.trim().isEmpty) continue;
-            try {
-              final json = jsonDecode(line);
-              if (json is Map && json['message'] != null) {
-                final payload = jsonDecode(json['message']);
-                if (payload is Map && payload['timestamp'] != null) {
-                  return payload['timestamp'] as int;
-                }
-              }
-            } catch (_) {}
-          }
+      final msgs = await _getNtfyMessages('kg_signal_${c}_disconnect', since: '30s');
+      for (final m in msgs.reversed) {
+        final payload = m['payload'] as Map<String, dynamic>;
+        if (payload['timestamp'] != null || payload['disconnectId'] != null) {
+          return {
+            ...payload,
+            '_ntfyId': m['ntfyId'],
+            '_ntfyTime': m['ntfyTime'],
+          };
         }
-      } catch (_) {}
+      }
     }
     return null;
   }
 
-  Future<bool> sendAnswer(String roomCode, String sdp, String type) async {
+  Future<bool> sendAnswer(String roomCode, String sdp, String type, {String? offerId}) async {
     final codes = _possibleCodes(roomCode);
     bool ok = false;
-    final payloadMap = {'sdp': sdp, 'type': type, 'timestamp': DateTime.now().millisecondsSinceEpoch};
-    final payload = jsonEncode(payloadMap);
+    final payload = jsonEncode({
+      'sdp': sdp,
+      'type': type,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      if (offerId != null) 'offerId': offerId,
+    });
 
     for (final c in codes) {
-      try {
-        final uri = Uri.parse('https://ntfy.sh');
-        final request = await _client.postUrl(uri);
-        request.headers.contentType = ContentType.json;
-        request.write(jsonEncode({
-          'topic': 'kg_signal_${c}_answer',
-          'message': payload,
-        }));
-        final response = await request.close().timeout(const Duration(seconds: 3));
-        if (response.statusCode == 200) ok = true;
-      } catch (_) {}
-
-      try {
-        final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_answer');
-        final request = await _client.postUrl(uri);
-        request.headers.contentType = ContentType.text;
-        request.write(payload);
-        final response = await request.close().timeout(const Duration(seconds: 3));
-        if (response.statusCode == 200) ok = true;
-      } catch (_) {}
+      if (await _postNtfy('kg_signal_${c}_answer', payload)) {
+        ok = true;
+      }
     }
-
     return ok;
   }
 
-  Future<Map<String, dynamic>?> getAnswer(String roomCode) async {
+  Future<Map<String, dynamic>?> getAnswer(String roomCode, {String? expectedOfferId}) async {
     final codes = _possibleCodes(roomCode);
+    Map<String, dynamic>? fallback;
     for (final c in codes) {
-      try {
-        final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_answer/json?poll=1');
-        final request = await _client.getUrl(uri);
-        final response = await request.close().timeout(const Duration(seconds: 3));
-        if (response.statusCode == 200) {
-          final body = await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 3));
-          final lines = body.trim().split('\n');
-          for (final line in lines.reversed) {
-            if (line.trim().isEmpty) continue;
-            try {
-              final json = jsonDecode(line);
-              if (json is Map && json['message'] != null) {
-                final payload = jsonDecode(json['message']);
-                if (payload is Map && payload['sdp'] != null) {
-                  return Map<String, dynamic>.from(payload);
-                }
-              }
-            } catch (_) {}
-          }
+      final msgs = await _getNtfyMessages('kg_signal_${c}_answer', since: '90s');
+      for (final m in msgs.reversed) {
+        final payload = m['payload'] as Map<String, dynamic>;
+        if (payload['sdp'] == null) continue;
+        final ansOfferId = payload['offerId']?.toString();
+        if (expectedOfferId != null && ansOfferId != null) {
+          if (ansOfferId == expectedOfferId) return payload;
+          continue; // Answer belongs to a different offerId
         }
-      } catch (e) {
-        debugPrint('ntfy getAnswer ($c): $e');
+        fallback ??= payload;
       }
     }
+    return fallback;
+  }
 
-    return null;
+  Future<bool> sendCandidatesBatch(
+    String roomCode,
+    List<Map<String, dynamic>> candidates,
+    String sender, {
+    String? offerId,
+  }) async {
+    if (candidates.isEmpty) return true;
+    final codes = _possibleCodes(roomCode);
+    final payload = jsonEncode({
+      'sender': sender,
+      if (offerId != null) 'offerId': offerId,
+      'candidates': candidates,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+    });
+
+    bool ok = false;
+    for (final c in codes) {
+      if (await _postNtfy('kg_signal_${c}_cand_$sender', payload)) {
+        ok = true;
+      }
+    }
+    return ok;
   }
 
   Future<bool> sendCandidate(
@@ -274,78 +421,51 @@ class SignalingService {
     String candidate,
     String? sdpMid,
     int? sdpMLineIndex,
-    String sender,
-  ) async {
-    final codes = _possibleCodes(roomCode);
-    final payload = jsonEncode({
-      'candidate': candidate,
-      'sdpMid': sdpMid,
-      'sdpMLineIndex': sdpMLineIndex,
-      'sender': sender,
-      'timestamp': DateTime.now().millisecondsSinceEpoch,
-    });
-
-    for (final c in codes) {
-      try {
-        final topic = 'kg_signal_${c}_cand_$sender';
-        final uri = Uri.parse('https://ntfy.sh');
-        final request = await _client.postUrl(uri);
-        request.headers.contentType = ContentType.json;
-        request.write(jsonEncode({
-          'topic': topic,
-          'message': payload,
-        }));
-        await request.close().timeout(const Duration(seconds: 3));
-      } catch (_) {}
-
-      try {
-        final topic = 'kg_signal_${c}_cand_$sender';
-        final uri = Uri.parse('https://ntfy.sh/$topic');
-        final request = await _client.postUrl(uri);
-        request.headers.contentType = ContentType.text;
-        request.write(payload);
-        await request.close().timeout(const Duration(seconds: 3));
-      } catch (_) {}
-    }
-
-    return true;
+    String sender, {
+    String? offerId,
+  }) async {
+    return sendCandidatesBatch(
+      roomCode,
+      [
+        {
+          'candidate': candidate,
+          'sdpMid': sdpMid,
+          'sdpMLineIndex': sdpMLineIndex,
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+        }
+      ],
+      sender,
+      offerId: offerId,
+    );
   }
 
   Future<List<Map<String, dynamic>>> getCandidates(
     String roomCode,
-    String forRole,
-    int sinceTimestamp,
-  ) async {
+    String forRole, {
+    String? expectedOfferId,
+  }) async {
     final codes = _possibleCodes(roomCode);
     final targetSender = forRole == 'kid' ? 'parent' : 'kid';
     final List<Map<String, dynamic>> results = [];
 
     for (final c in codes) {
-      try {
-        final topic = 'kg_signal_${c}_cand_$targetSender';
-        final uri = Uri.parse('https://ntfy.sh/$topic/json?poll=1');
-        final request = await _client.getUrl(uri);
-        final response = await request.close().timeout(const Duration(seconds: 3));
-        if (response.statusCode == 200) {
-          final body = await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 3));
-          final lines = body.trim().split('\n');
-          for (final line in lines) {
-            if (line.trim().isEmpty) continue;
-            try {
-              final json = jsonDecode(line);
-              if (json is Map && json['message'] != null) {
-                final payload = jsonDecode(json['message']);
-                if (payload is Map && payload['candidate'] != null) {
-                  final ts = payload['timestamp'] as int? ?? 0;
-                  if (ts > sinceTimestamp) {
-                    results.add(Map<String, dynamic>.from(payload));
-                  }
-                }
-              }
-            } catch (_) {}
-          }
+      final msgs = await _getNtfyMessages('kg_signal_${c}_cand_$targetSender', since: '2m');
+      for (final m in msgs) {
+        final payload = m['payload'] as Map<String, dynamic>;
+        final msgOfferId = payload['offerId']?.toString();
+        if (expectedOfferId != null && msgOfferId != null && msgOfferId != expectedOfferId) {
+          continue; // Stale ICE candidate batch from an older offer
         }
-      } catch (_) {}
+        if (payload['candidates'] is List) {
+          for (final item in payload['candidates']) {
+            if (item is Map && item['candidate'] != null) {
+              results.add(Map<String, dynamic>.from(item));
+            }
+          }
+        } else if (payload['candidate'] != null) {
+          results.add(payload);
+        }
+      }
     }
 
     return results;
@@ -355,33 +475,34 @@ class SignalingService {
     final codes = _possibleCodes(roomCode);
     final payload = jsonEncode({
       ...actionData,
+      'actionId': IceConfigService.generateId('act'),
       'timestamp': DateTime.now().millisecondsSinceEpoch,
     });
     bool ok = false;
     for (final c in codes) {
-      try {
-        final uri = Uri.parse('https://ntfy.sh');
-        final request = await _client.postUrl(uri);
-        request.headers.contentType = ContentType.json;
-        request.write(jsonEncode({
-          'topic': 'kg_signal_${c}_action',
-          'message': payload,
-        }));
-        await request.close().timeout(const Duration(seconds: 2));
+      if (await _postNtfy('kg_signal_${c}_action', payload)) {
         ok = true;
-      } catch (_) {}
+      }
 
-      try {
-        final uri = Uri.parse('$baseUrl/api/signal/room/$c/action');
-        final request = await _client.postUrl(uri);
-        request.headers.contentType = ContentType.json;
-        request.write(jsonEncode({
-          'action': actionData['type'] ?? 'REMOTE_ACTION',
-          'payload': actionData,
-        }));
-        await request.close().timeout(const Duration(seconds: 2));
-        ok = true;
-      } catch (_) {}
+      if (!_serverDisabled && baseUrl.isNotEmpty) {
+        try {
+          final uri = Uri.parse('$baseUrl/api/signal/room/$c/action');
+          final request = await _client.postUrl(uri);
+          request.followRedirects = false;
+          request.headers.contentType = ContentType.json;
+          request.write(jsonEncode({
+            'action': actionData['type'] ?? 'REMOTE_ACTION',
+            'payload': actionData,
+          }));
+          final resp = await request.close().timeout(const Duration(seconds: 2));
+          await resp.drain<void>().timeout(const Duration(seconds: 1), onTimeout: () {});
+          if (resp.statusCode == 302 || resp.statusCode == 401 || resp.statusCode == 403) {
+            _serverDisabled = true;
+          } else if (resp.statusCode == 200) {
+            ok = true;
+          }
+        } catch (_) {}
+      }
     }
     return ok;
   }
@@ -390,52 +511,41 @@ class SignalingService {
     final List<Map<String, dynamic>> actions = [];
     final codes = _possibleCodes(roomCode);
     for (final c in codes) {
-      // 1. Try local server endpoint first if reachable
-      try {
-        final uri = Uri.parse('$baseUrl/api/signal/room/$c/actions?since=$sinceTimestamp');
-        final request = await _client.getUrl(uri);
-        final response = await request.close().timeout(const Duration(seconds: 2));
-        if (response.statusCode == 200) {
-          final body = await response.transform(utf8.decoder).join();
-          final json = jsonDecode(body);
-          if (json is Map && json['actions'] is List) {
-            for (final a in json['actions']) {
-              if (a is Map && a['payload'] is Map) {
-                actions.add(Map<String, dynamic>.from(a['payload']));
+      if (!_serverDisabled && baseUrl.isNotEmpty) {
+        try {
+          final uri = Uri.parse('$baseUrl/api/signal/room/$c/actions?since=$sinceTimestamp');
+          final request = await _client.getUrl(uri);
+          request.followRedirects = false;
+          final response = await request.close().timeout(const Duration(seconds: 2));
+          if (response.statusCode == 302 || response.statusCode == 401 || response.statusCode == 403) {
+            _serverDisabled = true;
+            await response.drain<void>();
+          } else if (response.statusCode == 200) {
+            final body = await response.transform(utf8.decoder).join();
+            final json = jsonDecode(body);
+            if (json is Map && json['actions'] is List) {
+              for (final a in json['actions']) {
+                if (a is Map && a['payload'] is Map) {
+                  actions.add(Map<String, dynamic>.from(a['payload']));
+                }
               }
             }
+          } else {
+            await response.drain<void>();
           }
-        }
-      } catch (_) {}
+        } catch (_) {}
+      }
 
       if (actions.isNotEmpty) return actions;
 
-      // 2. Poll ntfy action topic
-      try {
-        final uri = Uri.parse('https://ntfy.sh/kg_signal_${c}_action/json?poll=1');
-        final request = await _client.getUrl(uri);
-        final response = await request.close().timeout(const Duration(seconds: 2));
-        if (response.statusCode == 200) {
-          final body = await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 2));
-          final lines = body.trim().split('\n');
-          for (final line in lines) {
-            if (line.trim().isEmpty) continue;
-            try {
-              final json = jsonDecode(line);
-              if (json is Map && json['message'] != null) {
-                final payload = jsonDecode(json['message']);
-                if (payload is Map) {
-                  final ts = payload['timestamp'] as int? ?? 0;
-                  if (ts > sinceTimestamp) {
-                    actions.add(Map<String, dynamic>.from(payload));
-                  }
-                }
-              }
-            } catch (_) {}
-          }
-        }
-      } catch (_) {}
-
+      final msgs = await _getNtfyMessages('kg_signal_${c}_action', since: '30s');
+      for (final m in msgs) {
+        final payload = m['payload'] as Map<String, dynamic>;
+        actions.add({
+          ...payload,
+          '_ntfyId': m['ntfyId'],
+        });
+      }
       if (actions.isNotEmpty) break;
     }
     return actions;
@@ -480,7 +590,8 @@ class LocalLanSignaling {
     required String roomCode,
     required String Function() getOfferSdp,
     required String Function() getOfferType,
-    required Future<Map<String, dynamic>> Function() onRequestFreshOffer,
+    required String Function() getOfferId,
+    required Future<Map<String, dynamic>> Function(String? reqId) onRequestFreshOffer,
     required Function() onParentDisconnected,
     required Function(String sdp, String type) onAnswerReceived,
     required Function(RTCIceCandidate candidate) onCandidateReceived,
@@ -520,29 +631,36 @@ class LocalLanSignaling {
         try {
           if (path == '/offer') {
             final isRefresh = request.uri.queryParameters['refresh'] == '1' || request.method == 'POST';
+            final reqId = request.uri.queryParameters['reqId'];
             String sdp;
             String type;
+            String offerId;
             if (isRefresh) {
-              final freshData = await onRequestFreshOffer();
+              final freshData = await onRequestFreshOffer(reqId);
               sdp = freshData['sdp'] ?? '';
               type = freshData['type'] ?? 'offer';
+              offerId = freshData['offerId'] ?? getOfferId();
             } else {
               sdp = getOfferSdp();
               type = getOfferType();
+              offerId = getOfferId();
             }
             request.response.headers.contentType = ContentType.json;
             request.response.write(jsonEncode({
               'sdp': sdp,
               'type': type,
+              'offerId': offerId,
               'code': clean,
               'timestamp': DateTime.now().millisecondsSinceEpoch,
             }));
           } else if (path == '/request-offer') {
-            final freshData = await onRequestFreshOffer();
+            final reqId = request.uri.queryParameters['reqId'];
+            final freshData = await onRequestFreshOffer(reqId);
             request.response.headers.contentType = ContentType.json;
             request.response.write(jsonEncode({
               'sdp': freshData['sdp'] ?? '',
               'type': freshData['type'] ?? 'offer',
+              'offerId': freshData['offerId'] ?? getOfferId(),
               'code': clean,
               'timestamp': DateTime.now().millisecondsSinceEpoch,
             }));
@@ -610,6 +728,7 @@ class LocalLanSignaling {
           'ips': localIps,
           'sdp': sdp,
           'type': getOfferType(),
+          'offerId': getOfferId(),
           'ts': DateTime.now().millisecondsSinceEpoch,
         });
         final bytes = utf8.encode(beacon);
@@ -623,13 +742,25 @@ class LocalLanSignaling {
     }
   }
 
-  // 2. PARENT DEVICE: Discover Child via Local Wi-Fi
-  Future<Map<String, dynamic>?> discoverOnLan(String roomCode, {bool requestFresh = false}) async {
+  // 2. PARENT DEVICE: Discover Child via Local Wi-Fi (race-free: at most ONE refresh call!)
+  Future<Map<String, dynamic>?> discoverOnLan(
+    String roomCode, {
+    bool requestFresh = false,
+    String? reqId,
+  }) async {
     final clean = cleanCode(roomCode);
     final completer = Completer<Map<String, dynamic>?>();
+    bool cancelled = false;
 
     RawDatagramSocket? listener;
     Timer? timeoutTimer;
+
+    void finishDiscovery(Map<String, dynamic>? result) {
+      if (!completer.isCompleted) {
+        cancelled = true;
+        completer.complete(result);
+      }
+    }
 
     try {
       listener = await RawDatagramSocket.bind(
@@ -641,6 +772,7 @@ class LocalLanSignaling {
       listener.broadcastEnabled = true;
 
       listener.listen((RawSocketEvent event) {
+        if (cancelled) return;
         if (event == RawSocketEvent.read) {
           final dg = listener?.receive();
           if (dg != null) {
@@ -657,16 +789,11 @@ class LocalLanSignaling {
                   }
                   _lanPeerPort = json['port'] as int? ?? 8998;
 
-                  if (requestFresh) {
-                    requestFreshOfferFromLan().then((fresh) {
-                      if (fresh != null && !completer.isCompleted) {
-                        completer.complete(fresh);
-                      }
-                    });
-                  } else if (json['sdp'] != null && !completer.isCompleted) {
-                    completer.complete({
+                  if (!cancelled && json['sdp'] != null) {
+                    finishDiscovery({
                       'sdp': json['sdp'],
                       'type': json['type'] ?? 'offer',
+                      'offerId': json['offerId'],
                       'lanIp': _lanPeerIp,
                       'lanPort': _lanPeerPort,
                     });
@@ -679,84 +806,98 @@ class LocalLanSignaling {
       });
     } catch (_) {}
 
-    // Subnet probe in parallel (checks nearby local IPs on same Wi-Fi)
-    _probeSubnetForChild(clean, requestFresh: requestFresh).then((res) {
-      if (res != null && !completer.isCompleted) {
+    // Read-only subnet probe in parallel (never calls ?refresh=1 blindly!)
+    _probeSubnetForChild(clean, isCancelled: () => cancelled).then((res) {
+      if (res != null && !cancelled) {
         _lanPeerIp = res['lanIp'];
         _lanPeerPort = res['lanPort'] ?? 8998;
-        completer.complete(res);
+        finishDiscovery(res);
       }
     });
 
-    timeoutTimer = Timer(const Duration(milliseconds: 1400), () {
-      if (!completer.isCompleted) {
-        completer.complete(null);
-      }
+    timeoutTimer = Timer(const Duration(milliseconds: 1100), () {
+      finishDiscovery(null);
       try {
         listener?.close();
       } catch (_) {}
     });
 
-    final res = await completer.future;
+    final discovered = await completer.future;
     timeoutTimer.cancel();
     try {
       listener?.close();
     } catch (_) {}
-    return res;
+
+    if (discovered != null && requestFresh && _lanPeerIp != null) {
+      final fresh = await requestFreshOfferFromLan(reqId: reqId);
+      if (fresh != null) return fresh;
+    }
+    return discovered;
   }
 
-  Future<Map<String, dynamic>?> _probeSubnetForChild(String cleanCode, {bool requestFresh = false}) async {
+  Future<Map<String, dynamic>?> _probeSubnetForChild(
+    String cleanCode, {
+    required bool Function() isCancelled,
+  }) async {
     try {
       final localIps = await getLocalIps();
       for (final ip in localIps) {
+        if (isCancelled()) return null;
         final parts = ip.split('.');
         if (parts.length != 4) continue;
-        final subnetPrefix = '${parts[0]}.${parts[1]}.${parts[2]}';
-        final myLastOctet = int.tryParse(parts[3]) ?? 0;
+        // Only probe private LAN subnets (skip cellular CGNAT IPs)
+        if (ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('172.')) {
+          final subnetPrefix = '${parts[0]}.${parts[1]}.${parts[2]}';
+          final myLastOctet = int.tryParse(parts[3]) ?? 0;
 
-        final candidateOctets = <int>[];
-        for (int offset = 1; offset <= 20; offset++) {
-          if (myLastOctet - offset > 1) candidateOctets.add(myLastOctet - offset);
-          if (myLastOctet + offset < 254) candidateOctets.add(myLastOctet + offset);
-        }
+          final candidateOctets = <int>[];
+          for (int offset = 1; offset <= 20; offset++) {
+            if (myLastOctet - offset > 1) candidateOctets.add(myLastOctet - offset);
+            if (myLastOctet + offset < 254) candidateOctets.add(myLastOctet + offset);
+          }
 
-        final client = HttpClient()..connectionTimeout = const Duration(milliseconds: 250);
-        for (final octet in candidateOctets) {
-          final targetIp = '$subnetPrefix.$octet';
-          try {
-            final path = requestFresh ? '/offer?refresh=1' : '/offer';
-            final uri = Uri.parse('http://$targetIp:8998$path');
-            final req = await client.getUrl(uri).timeout(const Duration(milliseconds: 300));
-            final resp = await req.close().timeout(const Duration(milliseconds: 300));
-            if (resp.statusCode == 200) {
-              final body = await resp.transform(utf8.decoder).join();
-              final json = jsonDecode(body);
-              if (json is Map && json['sdp'] != null) {
-                final c = json['code']?.toString() ?? '';
-                if (c.isEmpty || c == cleanCode || c.contains(cleanCode) || cleanCode.contains(c)) {
-                  client.close();
-                  return {
-                    'sdp': json['sdp'],
-                    'type': json['type'] ?? 'offer',
-                    'lanIp': targetIp,
-                    'lanPort': 8998,
-                  };
+          final client = HttpClient()..connectionTimeout = const Duration(milliseconds: 220);
+          for (final octet in candidateOctets) {
+            if (isCancelled()) break;
+            final targetIp = '$subnetPrefix.$octet';
+            try {
+              final uri = Uri.parse('http://$targetIp:8998/offer');
+              final req = await client.getUrl(uri).timeout(const Duration(milliseconds: 250));
+              final resp = await req.close().timeout(const Duration(milliseconds: 250));
+              if (resp.statusCode == 200) {
+                final body = await resp.transform(utf8.decoder).join();
+                final json = jsonDecode(body);
+                if (json is Map && json['sdp'] != null) {
+                  final c = json['code']?.toString() ?? '';
+                  if (c.isEmpty || c == cleanCode || c.contains(cleanCode) || cleanCode.contains(c)) {
+                    client.close();
+                    return {
+                      'sdp': json['sdp'],
+                      'type': json['type'] ?? 'offer',
+                      'offerId': json['offerId'],
+                      'lanIp': targetIp,
+                      'lanPort': 8998,
+                    };
+                  }
                 }
+              } else {
+                await resp.drain<void>();
               }
-            }
-          } catch (_) {}
+            } catch (_) {}
+          }
+          client.close();
         }
-        client.close();
       }
     } catch (_) {}
     return null;
   }
 
-  Future<Map<String, dynamic>?> requestFreshOfferFromLan() async {
+  Future<Map<String, dynamic>?> requestFreshOfferFromLan({String? reqId}) async {
     if (_lanPeerIp == null) return null;
     try {
       final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
-      final uri = Uri.parse('http://$_lanPeerIp:$_lanPeerPort/offer?refresh=1');
+      final q = reqId != null ? '?refresh=1&reqId=${Uri.encodeComponent(reqId)}' : '?refresh=1';
+      final uri = Uri.parse('http://$_lanPeerIp:$_lanPeerPort/offer$q');
       final req = await client.getUrl(uri);
       final resp = await req.close().timeout(const Duration(seconds: 2));
       if (resp.statusCode == 200) {
@@ -767,14 +908,42 @@ class LocalLanSignaling {
           return {
             'sdp': json['sdp'],
             'type': json['type'] ?? 'offer',
+            'offerId': json['offerId'],
             'lanIp': _lanPeerIp,
             'lanPort': _lanPeerPort,
           };
         }
+      } else {
+        await resp.drain<void>();
       }
       client.close();
     } catch (_) {}
     return null;
+  }
+
+  Future<List<Map<String, dynamic>>> fetchCandidatesFromLan() async {
+    if (_lanPeerIp == null) return [];
+    try {
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 1);
+      final uri = Uri.parse('http://$_lanPeerIp:$_lanPeerPort/candidates');
+      final req = await client.getUrl(uri);
+      final resp = await req.close().timeout(const Duration(seconds: 1));
+      if (resp.statusCode == 200) {
+        final body = await resp.transform(utf8.decoder).join();
+        final json = jsonDecode(body);
+        client.close();
+        if (json is Map && json['candidates'] is List) {
+          return (json['candidates'] as List)
+              .whereType<Map>()
+              .map((e) => Map<String, dynamic>.from(e))
+              .toList();
+        }
+      } else {
+        await resp.drain<void>();
+      }
+      client.close();
+    } catch (_) {}
+    return [];
   }
 
   Future<void> sendDisconnectToLan() async {
@@ -783,7 +952,8 @@ class LocalLanSignaling {
       final client = HttpClient()..connectionTimeout = const Duration(seconds: 1);
       final uri = Uri.parse('http://$_lanPeerIp:$_lanPeerPort/disconnect');
       final req = await client.postUrl(uri);
-      await req.close().timeout(const Duration(seconds: 1));
+      final resp = await req.close().timeout(const Duration(seconds: 1));
+      await resp.drain<void>();
       client.close();
     } catch (_) {}
   }
@@ -797,6 +967,7 @@ class LocalLanSignaling {
       req.headers.contentType = ContentType.json;
       req.write(jsonEncode({'sdp': sdp, 'type': type}));
       final resp = await req.close().timeout(const Duration(seconds: 2));
+      await resp.drain<void>();
       client.close();
       return resp.statusCode == 200;
     } catch (_) {
@@ -816,7 +987,8 @@ class LocalLanSignaling {
         'sdpMid': candidate.sdpMid,
         'sdpMLineIndex': candidate.sdpMLineIndex,
       }));
-      await req.close().timeout(const Duration(seconds: 1));
+      final resp = await req.close().timeout(const Duration(seconds: 1));
+      await resp.drain<void>();
       client.close();
     } catch (_) {}
   }
@@ -830,6 +1002,7 @@ class LocalLanSignaling {
       req.headers.contentType = ContentType.json;
       req.write(jsonEncode(actionData));
       final resp = await req.close().timeout(const Duration(seconds: 1));
+      await resp.drain<void>();
       client.close();
       return resp.statusCode == 200;
     } catch (_) {
@@ -900,6 +1073,134 @@ class KidGuardApp extends StatelessWidget {
 }
 
 // -------------------------------------------------------------
+// TURN RELAY SETTINGS DIALOG (For Strict Mobile Data / 4G / 5G CGNAT)
+// -------------------------------------------------------------
+Future<void> showTurnSettingsDialog(BuildContext context) async {
+  final current = await IceConfigService.loadSettings();
+  final meteredCtrl = TextEditingController(text: current['meteredUrl'] ?? '');
+  final turnCtrl = TextEditingController(text: current['turnUrl'] ?? '');
+  final userCtrl = TextEditingController(text: current['username'] ?? '');
+  final credCtrl = TextEditingController(text: current['credential'] ?? '');
+
+  if (!context.mounted) return;
+  await showDialog(
+    context: context,
+    builder: (ctx) {
+      return AlertDialog(
+        backgroundColor: const Color(0xFF1E293B),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Row(
+          children: [
+            Icon(Icons.cell_tower, color: Colors.cyanAccent),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'मोबाइल डेटा TURN Relay सेटिंग',
+                style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'अगर Wi-Fi पर ऐप चलता है लेकिन 4G/5G मोबाइल डेटा पर CGNAT ब्लॉक के कारण कनेक्ट नहीं होता, तो यहाँ फ्री Metered.ca API URL या Custom TURN सर्वर डालें (केवल एक फोन में डालने पर भी दोनों में काम करेगा):',
+                style: TextStyle(color: Colors.white70, fontSize: 12, height: 1.35),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: meteredCtrl,
+                style: const TextStyle(color: Colors.white, fontSize: 12),
+                decoration: InputDecoration(
+                  labelText: 'Metered API URL (वैकल्पिक)',
+                  hintText: 'https://xxx.metered.live/api/v1/turn/credentials?apiKey=...',
+                  hintStyle: const TextStyle(color: Colors.white38, fontSize: 11),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: turnCtrl,
+                style: const TextStyle(color: Colors.white, fontSize: 12),
+                decoration: InputDecoration(
+                  labelText: 'Custom TURN URL (वैकल्पिक)',
+                  hintText: 'turn:global.relay.metered.ca:80?transport=tcp',
+                  hintStyle: const TextStyle(color: Colors.white38, fontSize: 11),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: userCtrl,
+                style: const TextStyle(color: Colors.white, fontSize: 12),
+                decoration: InputDecoration(
+                  labelText: 'TURN Username',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: credCtrl,
+                style: const TextStyle(color: Colors.white, fontSize: 12),
+                decoration: InputDecoration(
+                  labelText: 'TURN Credential / Password',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              await IceConfigService.saveSettings();
+              if (ctx.mounted) Navigator.pop(ctx);
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('TURN सेटिंग रीसेट कर दी गई।')),
+                );
+              }
+            },
+            child: const Text('साफ़ करें', style: TextStyle(color: Colors.white54)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF0891B2),
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () async {
+              await IceConfigService.saveSettings(
+                meteredUrl: meteredCtrl.text,
+                turnUrl: turnCtrl.text,
+                username: userCtrl.text,
+                credential: credCtrl.text,
+              );
+              if (ctx.mounted) Navigator.pop(ctx);
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('✅ मोबाइल डेटा TURN Relay सेटिंग सेव हो गई!'),
+                    backgroundColor: Colors.green,
+                  ),
+                );
+              }
+            },
+            child: const Text('सेव करें'),
+          ),
+        ],
+      );
+    },
+  );
+  meteredCtrl.dispose();
+  turnCtrl.dispose();
+  userCtrl.dispose();
+  credCtrl.dispose();
+}
+
+// -------------------------------------------------------------
 // ROLE SELECTION SCREEN
 // -------------------------------------------------------------
 class RoleSelectionScreen extends StatelessWidget {
@@ -912,6 +1213,13 @@ class RoleSelectionScreen extends StatelessWidget {
         title: const Text('KidGuard Live - बाल मॉनिटर'),
         centerTitle: true,
         backgroundColor: const Color(0xFF1E293B),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.cell_tower, color: Colors.cyanAccent),
+            tooltip: 'मोबाइल डेटा TURN सेटिंग',
+            onPressed: () => showTurnSettingsDialog(context),
+          ),
+        ],
       ),
       body: Center(
         child: Padding(
@@ -954,6 +1262,15 @@ class RoleSelectionScreen extends StatelessWidget {
                   Navigator.push(context, MaterialPageRoute(builder: (_) => const ParentLiveMonitor()));
                 },
               ),
+              const SizedBox(height: 24),
+              TextButton.icon(
+                icon: const Icon(Icons.settings_ethernet, size: 18, color: Colors.cyanAccent),
+                label: const Text(
+                  'मोबाइल डेटा (4G/5G) TURN Relay सेटिंग',
+                  style: TextStyle(color: Colors.cyanAccent, fontSize: 13),
+                ),
+                onPressed: () => showTurnSettingsDialog(context),
+              ),
             ],
           ),
         ),
@@ -972,7 +1289,7 @@ class ChildScreenCapture extends StatefulWidget {
   State<ChildScreenCapture> createState() => _ChildScreenCaptureState();
 }
 
-class _ChildScreenCaptureState extends State<ChildScreenCapture> {
+class _ChildScreenCaptureState extends State<ChildScreenCapture> with WidgetsBindingObserver {
   static const MethodChannel _platformChannel = MethodChannel('com.example.kidguard_live/screen_capture');
   final SignalingService _signaling = SignalingService();
   final LocalLanSignaling _localLan = LocalLanSignaling();
@@ -982,6 +1299,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
   MediaStream? _screenStream;
   bool _isSharing = false;
   bool _isStartingShare = false;
+  bool _isPreparingPc = false;
   String _statusMessage = 'तैयार है। स्क्रीन शेयर शुरू करें।';
   bool _isParentConnected = false;
   String _parentPin = '1234'; // Security PIN to stop broadcast or change settings
@@ -996,33 +1314,43 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
   Timer? _actionFeedbackTimer;
   Timer? _actionPollTimer;
   int _lastActionTimestamp = 0;
+  final Set<String> _handledActionIds = {};
 
   Timer? _answerPollTimer;
   Timer? _candidatePollTimer;
   Timer? _offerHeartbeatTimer;
   Timer? _reconnectListenTimer;
-  int _lastCandidateTimestamp = 0;
-  int _lastHandledReqTimestamp = 0;
-  int _lastHandledDisconnectTimestamp = 0;
+  Timer? _iceDisconnectGraceTimer;
+  Timer? _candidateFlushTimer;
+  int _offerCreatedAtMs = 0;
+  String _currentOfferId = '';
+  String? _currentReplyReqId;
   bool _isRemoteDescSet = false;
+  final Set<String> _handledReqIds = {};
+  final Set<String> _handledDisconnectIds = {};
+  final Set<String> _addedRemoteCandidateKeys = {};
   final List<RTCIceCandidate> _queuedCandidates = [];
   final List<Map<String, dynamic>> _collectedChildCandidates = [];
-  String? _latestOfferSdp;
-  String? _latestOfferType;
-
-  final Map<String, dynamic> _iceServers = {
-    'iceServers': [
-      {'urls': 'stun:stun.l.google.com:19302'},
-      {'urls': 'stun:stun1.l.google.com:19302'},
-      {'urls': 'stun:stun2.l.google.com:19302'},
-    ],
-    'sdpSemantics': 'unified-plan',
-  };
+  final List<Map<String, dynamic>> _outgoingCandidateBuffer = [];
+  List<Map<String, dynamic>>? _remoteTurnServers;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initForegroundTask();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!_isSharing) return;
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+      // Keep mic and foreground service alive when Poco/Xiaomi enters background
+      _micAudioTrack?.enabled = _isMicActive;
+      _platformChannel.invokeMethod('upgradeScreenCaptureService').catchError((_) {});
+    } else if (state == AppLifecycleState.resumed) {
+      _micAudioTrack?.enabled = _isMicActive;
+    }
   }
 
   void _handleIncomingRemoteAction(String rawJson) {
@@ -1033,27 +1361,33 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
 
       if (type == 'TOGGLE_AUDIO') {
         final enabled = map['enabled'] as bool? ?? true;
-        setState(() {
-          _isMicActive = enabled;
-          _remoteActionFeedback = enabled ? '🎙️ माता-पिता ने ऑडियो चालू किया (माइक लाइव)' : '🔇 माता-पिता ने ऑडियो म्यूट किया';
-        });
+        if (mounted) {
+          setState(() {
+            _isMicActive = enabled;
+            _remoteActionFeedback = enabled ? '🎙️ माता-पिता ने ऑडियो चालू किया (माइक लाइव)' : '🔇 माता-पिता ने ऑडियो म्यूट किया';
+          });
+        }
         _micAudioTrack?.enabled = enabled;
         _resetFeedbackTimer();
       } else if (type == 'REMOTE_TOUCH') {
         final x = (map['x'] as num?)?.toDouble() ?? 0.5;
         final y = (map['y'] as num?)?.toDouble() ?? 0.5;
         HapticFeedback.lightImpact();
-        setState(() {
-          _lastRemoteTouchPoint = Offset(x, y);
-          _remoteActionFeedback = '👆 माता-पिता का रिमोट टच: ${(x * 100).toStringAsFixed(0)}%, ${(y * 100).toStringAsFixed(0)}%';
-        });
+        if (mounted) {
+          setState(() {
+            _lastRemoteTouchPoint = Offset(x, y);
+            _remoteActionFeedback = '👆 माता-पिता का रिमोट टच: ${(x * 100).toStringAsFixed(0)}%, ${(y * 100).toStringAsFixed(0)}%';
+          });
+        }
         _resetFeedbackTimer();
       } else if (type == 'REMOTE_NAV') {
         final key = map['key'] as String? ?? map['action'] as String? ?? '';
         HapticFeedback.mediumImpact();
-        setState(() {
-          _remoteActionFeedback = '👆 रिमोट नेविगेशन: $key';
-        });
+        if (mounted) {
+          setState(() {
+            _remoteActionFeedback = '👆 रिमोट नेविगेशन: $key';
+          });
+        }
         _resetFeedbackTimer();
       }
     } catch (e) {
@@ -1087,12 +1421,20 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
   void _startPollingForActions(String roomCode) {
     _actionPollTimer?.cancel();
     _lastActionTimestamp = DateTime.now().millisecondsSinceEpoch;
-    _actionPollTimer = Timer.periodic(const Duration(milliseconds: 1000), (_) async {
+    _handledActionIds.clear();
+    _actionPollTimer = Timer.periodic(const Duration(milliseconds: 1200), (_) async {
       if (!_isSharing) return;
       final actions = await _signaling.getActions(roomCode, _lastActionTimestamp);
       for (final a in actions) {
+        final aid = (a['actionId'] ?? a['_ntfyId'] ?? '').toString();
         final ts = a['timestamp'] as int? ?? 0;
-        if (ts > _lastActionTimestamp) {
+        if (aid.isNotEmpty) {
+          if (_handledActionIds.contains(aid)) continue;
+          _handledActionIds.add(aid);
+          // Only process actions created close to or after broadcast started
+          if (ts > 0 && ts < _lastActionTimestamp - 15000) continue;
+          _handleIncomingRemoteAction(jsonEncode(a));
+        } else if (ts > _lastActionTimestamp) {
           _lastActionTimestamp = ts;
           _handleIncomingRemoteAction(jsonEncode(a));
         }
@@ -1123,7 +1465,17 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
     );
   }
 
-  void _setupChildPeerConnectionListeners(String roomCode) {
+  void _scheduleCandidateBatchFlush(String roomCode, String offerId) {
+    _candidateFlushTimer?.cancel();
+    _candidateFlushTimer = Timer(const Duration(milliseconds: 350), () {
+      if (_outgoingCandidateBuffer.isEmpty || !_isSharing) return;
+      final batch = List<Map<String, dynamic>>.from(_outgoingCandidateBuffer);
+      _outgoingCandidateBuffer.clear();
+      _signaling.sendCandidatesBatch(roomCode, batch, 'kid', offerId: offerId);
+    });
+  }
+
+  void _setupChildPeerConnectionListeners(String roomCode, String offerId) {
     if (_peerConnection == null) return;
 
     try {
@@ -1147,52 +1499,120 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       debugPrint("📡 [Kid] ICE Connection State: $state");
       if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
           state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+        _iceDisconnectGraceTimer?.cancel();
+        _iceDisconnectGraceTimer = null;
         if (mounted) {
           setState(() {
             _isParentConnected = true;
             _statusMessage = '✅ माता-पिता का फोन सफलतापूर्वक जुड़ गया है!';
           });
         }
-      } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected ||
-          state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+      } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+        // Grace period: WebRTC often self-recovers in 1-3s when app goes to background!
+        // Never tear down the PeerConnection immediately on transient Disconnected!
+        if (mounted) {
+          setState(() {
+            _statusMessage = '🔄 नेटवर्क अस्थायी रूप से धीमा है — कनेक्शन बनाए रख रहे हैं...';
+          });
+        }
+        _iceDisconnectGraceTimer?.cancel();
+        _iceDisconnectGraceTimer = Timer(const Duration(seconds: 8), () {
+          if (!_isSharing || _screenStream == null) return;
+          if (mounted) {
+            setState(() {
+              _isParentConnected = false;
+              _statusMessage = 'माता-पिता का फोन डिस्कनेक्ट हो गया। पुनः जुड़ने की प्रतीक्षा...';
+            });
+          }
+          _prepareFreshPeerConnection(roomCode, force: true);
+        });
+      } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+        _iceDisconnectGraceTimer?.cancel();
+        _iceDisconnectGraceTimer = null;
         if (mounted) {
           setState(() {
             _isParentConnected = false;
-            _statusMessage = 'माता-पिता का फोन डिस्कनेक्ट हो गया। पुनः जुड़ने की प्रतीक्षा...';
+            _statusMessage = 'कनेक्शन असफल (मोबाइल डेटा पर TURN सेटिंग जांचें)। पुनः प्रयास प्रतीक्षा...';
           });
         }
-        // Auto-recycle peer connection with active screen stream so parent can reconnect immediately!
-        _prepareFreshPeerConnection(roomCode);
+        _prepareFreshPeerConnection(roomCode, force: true);
       }
     };
 
     _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
       if (candidate.candidate != null) {
-        _collectedChildCandidates.add({
+        final item = {
           'candidate': candidate.candidate,
           'sdpMid': candidate.sdpMid,
           'sdpMLineIndex': candidate.sdpMLineIndex,
           'timestamp': DateTime.now().millisecondsSinceEpoch,
-        });
-        _signaling.sendCandidate(
-          roomCode,
-          candidate.candidate!,
-          candidate.sdpMid,
-          candidate.sdpMLineIndex,
-          'kid',
-        );
+        };
+        _collectedChildCandidates.add(item);
+        _outgoingCandidateBuffer.add(item);
+        _scheduleCandidateBatchFlush(roomCode, offerId);
       }
     };
   }
 
   // Generates a brand new PeerConnection from the EXISTING running screen stream
   // ZERO PERMISSION PROMPT REQUIRED! Screen continues streaming continuously!
-  Future<Map<String, dynamic>> _prepareFreshPeerConnection(String roomCode) async {
+  Future<Map<String, dynamic>> _prepareFreshPeerConnection(
+    String roomCode, {
+    String? reqId,
+    List<Map<String, dynamic>>? extraTurnServers,
+    bool force = false,
+  }) async {
     if (!_isSharing || _screenStream == null) {
-      return {'sdp': _latestOfferSdp ?? '', 'type': _latestOfferType ?? 'offer'};
+      return {
+        'sdp': _latestOfferSdp ?? '',
+        'type': _latestOfferType ?? 'offer',
+        'offerId': _currentOfferId,
+      };
     }
-    debugPrint("🔄 [Kid] Generating fresh WebRTC offer for Parent reconnection (screen stream kept alive)...");
 
+    if (reqId != null && reqId.isNotEmpty) {
+      if (_handledReqIds.contains(reqId)) {
+        debugPrint("⏭️ [Kid] Skipping duplicate reqId=$reqId");
+        return {
+          'sdp': _latestOfferSdp ?? '',
+          'type': _latestOfferType ?? 'offer',
+          'offerId': _currentOfferId,
+        };
+      }
+      _handledReqIds.add(reqId);
+    }
+
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if (!force &&
+        !_isRemoteDescSet &&
+        !_isParentConnected &&
+        _offerCreatedAtMs > 0 &&
+        (nowMs - _offerCreatedAtMs) < 3500 &&
+        _latestOfferSdp != null) {
+      debugPrint("⏭️ [Kid] Keeping freshly created offer (${nowMs - _offerCreatedAtMs}ms old)");
+      return {
+        'sdp': _latestOfferSdp ?? '',
+        'type': _latestOfferType ?? 'offer',
+        'offerId': _currentOfferId,
+      };
+    }
+
+    if (_isPreparingPc) {
+      debugPrint("⏭️ [Kid] Already preparing PeerConnection, returning active offer");
+      return {
+        'sdp': _latestOfferSdp ?? '',
+        'type': _latestOfferType ?? 'offer',
+        'offerId': _currentOfferId,
+      };
+    }
+
+    _isPreparingPc = true;
+    debugPrint("🔄 [Kid] Generating fresh WebRTC offer (reqId=$reqId, screen stream kept alive)...");
+
+    _iceDisconnectGraceTimer?.cancel();
+    _iceDisconnectGraceTimer = null;
+    _candidateFlushTimer?.cancel();
+    _outgoingCandidateBuffer.clear();
     _answerPollTimer?.cancel();
     _candidatePollTimer?.cancel();
 
@@ -1204,11 +1624,21 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
     _isParentConnected = false;
     _queuedCandidates.clear();
     _collectedChildCandidates.clear();
-    _lastCandidateTimestamp = DateTime.now().millisecondsSinceEpoch;
+    _addedRemoteCandidateKeys.clear();
+
+    if (extraTurnServers != null && extraTurnServers.isNotEmpty) {
+      _remoteTurnServers = extraTurnServers;
+    }
 
     try {
-      _peerConnection = await createPeerConnection(_iceServers);
-      _setupChildPeerConnectionListeners(roomCode);
+      final newOfferId = IceConfigService.generateId('off');
+      _currentOfferId = newOfferId;
+      _currentReplyReqId = reqId;
+      _offerCreatedAtMs = DateTime.now().millisecondsSinceEpoch;
+
+      final iceConfig = await IceConfigService.buildIceConfig(extraTurnServers: _remoteTurnServers);
+      _peerConnection = await createPeerConnection(iceConfig);
+      _setupChildPeerConnectionListeners(roomCode, newOfferId);
 
       for (final track in _screenStream!.getTracks()) {
         await _peerConnection!.addTrack(track, _screenStream!);
@@ -1225,8 +1655,16 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       _latestOfferSdp = offer.sdp;
       _latestOfferType = offer.type;
 
-      _startPollingForAnswer(roomCode);
-      _signaling.sendOffer(roomCode, offer.sdp!, offer.type!);
+      final localTurnServers = await IceConfigService.getCustomTurnServers();
+      _startPollingForAnswer(roomCode, newOfferId);
+      _signaling.sendOffer(
+        roomCode,
+        offer.sdp!,
+        offer.type!,
+        offerId: newOfferId,
+        replyToReqId: reqId,
+        turnServers: localTurnServers,
+      );
 
       if (mounted) {
         setState(() {
@@ -1235,33 +1673,70 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         });
       }
 
-      return {'sdp': offer.sdp ?? '', 'type': offer.type ?? 'offer'};
+      return {
+        'sdp': offer.sdp ?? '',
+        'type': offer.type ?? 'offer',
+        'offerId': newOfferId,
+      };
     } catch (e) {
       debugPrint("Error preparing fresh peer connection: $e");
-      return {'sdp': _latestOfferSdp ?? '', 'type': _latestOfferType ?? 'offer'};
+      return {
+        'sdp': _latestOfferSdp ?? '',
+        'type': _latestOfferType ?? 'offer',
+        'offerId': _currentOfferId,
+      };
+    } finally {
+      _isPreparingPc = false;
     }
   }
 
   void _startListeningForReconnectRequests(String roomCode) {
     _reconnectListenTimer?.cancel();
-    _reconnectListenTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) async {
+    _reconnectListenTimer = Timer.periodic(const Duration(milliseconds: 1400), (_) async {
       if (!_isSharing || _screenStream == null) return;
 
-      // 1. Check parent connect request
-      final reqTs = await _signaling.getLatestRequestTimestamp(roomCode);
-      if (reqTs != null && reqTs > _lastHandledReqTimestamp) {
-        _lastHandledReqTimestamp = reqTs;
-        debugPrint("⚡ [Kid] Received fresh connection request from Parent ($reqTs)");
-        await _prepareFreshPeerConnection(roomCode);
-        return;
+      // 1. Check parent connect request (matched purely by unique reqId — zero clock skew!)
+      final reqData = await _signaling.getLatestRequest(roomCode);
+      if (reqData != null) {
+        final reqId = (reqData['reqId'] ?? reqData['_ntfyId'] ?? '').toString();
+
+        List<Map<String, dynamic>>? extraTurn;
+        if (reqData['turnServers'] is List) {
+          extraTurn = (reqData['turnServers'] as List)
+              .whereType<Map>()
+              .map((m) => Map<String, dynamic>.from(m))
+              .toList();
+        }
+
+        final bool isNewReqId = reqId.isNotEmpty && !_handledReqIds.contains(reqId);
+        if (isNewReqId) {
+          debugPrint("⚡ [Kid] Received fresh connection request from Parent (reqId=$reqId)");
+          await _prepareFreshPeerConnection(
+            roomCode,
+            reqId: reqId,
+            extraTurnServers: extraTurn,
+            force: true,
+          );
+          return;
+        }
       }
 
-      // 2. Check parent disconnect event
-      final disTs = await _signaling.getLatestDisconnectTimestamp(roomCode);
-      if (disTs != null && disTs > _lastHandledDisconnectTimestamp) {
-        _lastHandledDisconnectTimestamp = disTs;
-        debugPrint("⚡ [Kid] Received disconnect notification from Parent ($disTs)");
-        await _prepareFreshPeerConnection(roomCode);
+      // 2. Check explicit parent disconnect event ONLY when an active session exists
+      if (_isParentConnected || _isRemoteDescSet) {
+        final discData = await _signaling.getLatestDisconnect(roomCode);
+        if (discData != null) {
+          final discId = (discData['disconnectId'] ?? discData['_ntfyId'] ?? '').toString();
+          final discOfferId = discData['offerId']?.toString();
+          final bool isNewDisc = discId.isNotEmpty && !_handledDisconnectIds.contains(discId);
+          final bool matchesActiveOffer = discOfferId == null || discOfferId == _currentOfferId;
+          if (isNewDisc && matchesActiveOffer) {
+            _handledDisconnectIds.add(discId);
+            debugPrint("⚡ [Kid] Received explicit disconnect for offer $_currentOfferId ($discId)");
+            await _prepareFreshPeerConnection(roomCode, force: true);
+          } else if (discId.isNotEmpty) {
+            _handledDisconnectIds.add(discId);
+          }
+        }
       }
     });
   }
@@ -1299,12 +1774,42 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         debugPrint('Permission notice: $permError');
       }
 
+      // Ask for Battery Optimization exemption so HyperOS/Poco C71 doesn't kill Wi-Fi/socket in background
+      try {
+        final ignoring = await _platformChannel.invokeMethod('isIgnoringBatteryOptimizations');
+        if (ignoring != true) {
+          await _platformChannel.invokeMethod('requestIgnoreBatteryOptimizations');
+          await Future.delayed(const Duration(milliseconds: 400));
+        }
+      } catch (batErr) {
+        debugPrint('Battery optimization prompt notice: $batErr');
+      }
+
       setState(() {
         _statusMessage = '1/4: WebRTC Peer Connection तैयार हो रहा है...';
       });
 
-      _peerConnection = await createPeerConnection(_iceServers);
-      _setupChildPeerConnectionListeners(roomCode);
+      final initialOfferId = IceConfigService.generateId('off');
+      _currentOfferId = initialOfferId;
+      _currentReplyReqId = null;
+      _offerCreatedAtMs = DateTime.now().millisecondsSinceEpoch;
+      _handledReqIds.clear();
+      _handledDisconnectIds.clear();
+      _addedRemoteCandidateKeys.clear();
+      _outgoingCandidateBuffer.clear();
+
+      // Seed any stale disconnect/request messages already sitting in ntfy before we start
+      try {
+        final preDisc = await _signaling.getLatestDisconnect(roomCode);
+        if (preDisc != null) {
+          final id = (preDisc['disconnectId'] ?? preDisc['_ntfyId'] ?? '').toString();
+          if (id.isNotEmpty) _handledDisconnectIds.add(id);
+        }
+      } catch (_) {}
+
+      final iceConfig = await IceConfigService.buildIceConfig(extraTurnServers: _remoteTurnServers);
+      _peerConnection = await createPeerConnection(iceConfig);
+      _setupChildPeerConnectionListeners(roomCode, initialOfferId);
 
       setState(() {
         _statusMessage = '2/4: स्क्रीन शेयर अनुमति मांग रहे हैं... (कृपया "Entire screen" चुनें)';
@@ -1402,6 +1907,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       await _peerConnection!.setLocalDescription(offer);
       _latestOfferSdp = offer.sdp;
       _latestOfferType = offer.type;
+      _offerCreatedAtMs = DateTime.now().millisecondsSinceEpoch;
 
       setState(() {
         _isSharing = true;
@@ -1416,8 +1922,9 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         roomCode: roomCode,
         getOfferSdp: () => _latestOfferSdp ?? offer.sdp ?? '',
         getOfferType: () => _latestOfferType ?? offer.type ?? 'offer',
-        onRequestFreshOffer: () => _prepareFreshPeerConnection(roomCode),
-        onParentDisconnected: () => _prepareFreshPeerConnection(roomCode),
+        getOfferId: () => _currentOfferId,
+        onRequestFreshOffer: (reqId) => _prepareFreshPeerConnection(roomCode, reqId: reqId),
+        onParentDisconnected: () => _prepareFreshPeerConnection(roomCode, force: true),
         onActionReceived: (actionMap) {
           _handleIncomingRemoteAction(jsonEncode(actionMap));
         },
@@ -1435,6 +1942,9 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
           }
         },
         onCandidateReceived: (cand) async {
+          final key = cand.candidate ?? '';
+          if (key.isNotEmpty && _addedRemoteCandidateKeys.contains(key)) return;
+          if (key.isNotEmpty) _addedRemoteCandidateKeys.add(key);
           if (_isRemoteDescSet) {
             await _peerConnection?.addCandidate(cand);
           } else {
@@ -1448,13 +1958,22 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       _startPollingForActions(roomCode);
 
       // 2. Poll for Parent's Answer on Cloud Relay
-      _startPollingForAnswer(roomCode);
+      _startPollingForAnswer(roomCode, initialOfferId);
 
       // 3. Listen for reconnection/offer requests from Parent
       _startListeningForReconnectRequests(roomCode);
 
       // 4. Send initial Offer asynchronously
-      _signaling.sendOffer(roomCode, offer.sdp!, offer.type!).then((ok) {
+      final initialTurns = await IceConfigService.getCustomTurnServers();
+      _signaling
+          .sendOffer(
+            roomCode,
+            offer.sdp!,
+            offer.type!,
+            offerId: initialOfferId,
+            turnServers: initialTurns,
+          )
+          .then((ok) {
         if (mounted && _isSharing) {
           setState(() {
             _statusMessage = '🔴 ब्रॉडकास्ट सक्रिय है! कोड: $roomCode\nमाता-पिता के जुड़ने की प्रतीक्षा...';
@@ -1462,11 +1981,19 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         }
       });
 
-      // 5. Offer Heartbeat: keep refreshing Offer so parent can connect anytime!
+      // 5. Low-frequency Offer Heartbeat (every 12s, prevents ntfy.sh 429 rate-limit!)
       _offerHeartbeatTimer?.cancel();
-      _offerHeartbeatTimer = Timer.periodic(const Duration(milliseconds: 2500), (_) {
+      _offerHeartbeatTimer = Timer.periodic(const Duration(seconds: 12), (_) async {
         if (_isSharing && !_isParentConnected && _peerConnection != null && _latestOfferSdp != null) {
-          _signaling.sendOffer(roomCode, _latestOfferSdp!, _latestOfferType ?? 'offer');
+          final turns = await IceConfigService.getCustomTurnServers();
+          _signaling.sendOffer(
+            roomCode,
+            _latestOfferSdp!,
+            _latestOfferType ?? 'offer',
+            offerId: _currentOfferId,
+            replyToReqId: _currentReplyReqId,
+            turnServers: turns,
+          );
         }
       });
 
@@ -1495,12 +2022,12 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
   }
 
   // Listen / Poll for Parent's Answer
-  void _startPollingForAnswer(String roomCode) {
+  void _startPollingForAnswer(String roomCode, String expectedOfferId) {
     _answerPollTimer?.cancel();
-    _answerPollTimer = Timer.periodic(const Duration(seconds: 1), (timer) async {
+    _answerPollTimer = Timer.periodic(const Duration(milliseconds: 1200), (timer) async {
       if (!_isSharing || _isRemoteDescSet || _peerConnection == null) return;
 
-      final answerData = await _signaling.getAnswer(roomCode);
+      final answerData = await _signaling.getAnswer(roomCode, expectedOfferId: expectedOfferId);
       if (answerData != null && answerData['sdp'] != null && !_isRemoteDescSet) {
         _isRemoteDescSet = true;
         timer.cancel();
@@ -1514,7 +2041,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         await _peerConnection!.setRemoteDescription(answer);
 
         _drainQueuedCandidates();
-        _startListeningToParentIceCandidates(roomCode);
+        _startListeningToParentIceCandidates(roomCode, expectedOfferId);
 
         if (mounted) {
           setState(() {
@@ -1525,7 +2052,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
     });
   }
 
-  void _startListeningToParentIceCandidates(String roomCode) {
+  void _startListeningToParentIceCandidates(String roomCode, String expectedOfferId) {
     _candidatePollTimer?.cancel();
     _candidatePollTimer = Timer.periodic(const Duration(milliseconds: 1500), (timer) async {
       if (!_isSharing || _peerConnection == null) {
@@ -1533,20 +2060,25 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         return;
       }
 
-      final list = await _signaling.getCandidates(roomCode, 'kid', _lastCandidateTimestamp);
+      final list = await _signaling.getCandidates(
+        roomCode,
+        'kid',
+        expectedOfferId: expectedOfferId,
+      );
       for (final item in list) {
         final cStr = item['candidate'] as String?;
         final sdpMid = item['sdpMid'] as String?;
         final sdpMLineIndex = item['sdpMLineIndex'] as int?;
-        final ts = item['timestamp'] as int? ?? 0;
-        if (ts > _lastCandidateTimestamp) {
-          _lastCandidateTimestamp = ts;
-        }
 
-        if (cStr != null) {
+        if (cStr != null && !_addedRemoteCandidateKeys.contains(cStr)) {
+          _addedRemoteCandidateKeys.add(cStr);
           final candidate = RTCIceCandidate(cStr, sdpMid, sdpMLineIndex);
           if (_isRemoteDescSet) {
-            await _peerConnection!.addCandidate(candidate);
+            try {
+              await _peerConnection!.addCandidate(candidate);
+            } catch (e) {
+              debugPrint('Candidate add error: $e');
+            }
           } else {
             _queuedCandidates.add(candidate);
           }
@@ -1573,12 +2105,18 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
     _offerHeartbeatTimer = null;
     _reconnectListenTimer?.cancel();
     _reconnectListenTimer = null;
+    _iceDisconnectGraceTimer?.cancel();
+    _iceDisconnectGraceTimer = null;
+    _candidateFlushTimer?.cancel();
+    _candidateFlushTimer = null;
     _actionPollTimer?.cancel();
     _actionPollTimer = null;
     _actionFeedbackTimer?.cancel();
     _actionFeedbackTimer = null;
     _localLan.stop();
     _collectedChildCandidates.clear();
+    _outgoingCandidateBuffer.clear();
+    _addedRemoteCandidateKeys.clear();
 
     try {
       await _platformChannel.invokeMethod('stopScreenCapture');
@@ -1700,6 +2238,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _stopScreenShare();
     _codeController.dispose();
     super.dispose();
@@ -1711,6 +2250,13 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       appBar: AppBar(
         title: const Text('बच्चे का फोन - स्क्रीन शेयर'),
         backgroundColor: const Color(0xFF1E293B),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.cell_tower, color: Colors.cyanAccent),
+            tooltip: 'मोबाइल डेटा TURN सेटिंग',
+            onPressed: () => showTurnSettingsDialog(context),
+          ),
+        ],
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(20),
@@ -2046,18 +2592,12 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
   Timer? _touchFeedbackTimer;
 
   Timer? _candidatePollTimer;
-  int _lastCandidateTimestamp = 0;
+  Timer? _candidateFlushTimer;
+  String? _activeOfferId;
   bool _isRemoteDescSet = false;
+  final Set<String> _addedRemoteCandidateKeys = {};
   final List<RTCIceCandidate> _queuedCandidates = [];
-
-  final Map<String, dynamic> _iceServers = {
-    'iceServers': [
-      {'urls': 'stun:stun.l.google.com:19302'},
-      {'urls': 'stun:stun1.l.google.com:19302'},
-      {'urls': 'stun:stun2.l.google.com:19302'},
-    ],
-    'sdpSemantics': 'unified-plan',
-  };
+  final List<Map<String, dynamic>> _outgoingCandidateBuffer = [];
 
   @override
   void initState() {
@@ -2099,11 +2639,11 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
       _localLan.sendActionToLan(fullData);
     }
 
-    // 3. Cloud Relay (ntfy + server)
+    // 3. Cloud Relay (ntfy)
     _signaling.sendAction(roomCode, fullData);
   }
 
-  void _toggleLiveAudio() {
+  Future<void> _toggleLiveAudio() async {
     setState(() {
       _isLiveAudioOn = !_isLiveAudioOn;
     });
@@ -2112,20 +2652,27 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
       _remoteAudioTrack!.enabled = _isLiveAudioOn;
     }
 
+    // Route WebRTC voice output to loudspeaker instead of low-volume earpiece!
+    try {
+      await Helper.setSpeakerphoneOn(_isLiveAudioOn);
+    } catch (_) {}
+
     _sendRemoteAction({
       'type': 'TOGGLE_AUDIO',
       'enabled': _isLiveAudioOn,
     });
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(_isLiveAudioOn
-            ? '🔊 लाइव ऑडियो चालू: बच्चे के फोन की आवाज सुनाई दे रही है'
-            : '🔇 लाइव ऑडियो म्यूट किया गया'),
-        duration: const Duration(seconds: 1),
-        backgroundColor: _isLiveAudioOn ? Colors.teal : Colors.blueGrey,
-      ),
-    );
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_isLiveAudioOn
+              ? '🔊 लाइव ऑडियो चालू: बच्चे के फोन की आवाज सुनाई दे रही है'
+              : '🔇 लाइव ऑडियो म्यूट किया गया'),
+          duration: const Duration(seconds: 1),
+          backgroundColor: _isLiveAudioOn ? Colors.teal : Colors.blueGrey,
+        ),
+      );
+    }
   }
 
   void _toggleRemoteTouch() {
@@ -2187,6 +2734,16 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     );
   }
 
+  void _scheduleParentCandidateBatchFlush(String roomCode, String? offerId) {
+    _candidateFlushTimer?.cancel();
+    _candidateFlushTimer = Timer(const Duration(milliseconds: 350), () {
+      if (_outgoingCandidateBuffer.isEmpty) return;
+      final batch = List<Map<String, dynamic>>.from(_outgoingCandidateBuffer);
+      _outgoingCandidateBuffer.clear();
+      _signaling.sendCandidatesBatch(roomCode, batch, 'parent', offerId: offerId);
+    });
+  }
+
   Future<void> _connectToChild() async {
     final roomCode = _codeController.text.trim().toUpperCase();
     if (roomCode.isEmpty) {
@@ -2196,7 +2753,9 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
       return;
     }
 
-    _disconnect();
+    // Do NOT emit Cloud sendDisconnect when starting a fresh connection —
+    // otherwise Child reads that disconnect 1.5s later and kills the new PeerConnection!
+    _cleanupConnectionOnly(emitDisconnect: false);
 
     setState(() {
       _isConnecting = true;
@@ -2205,56 +2764,93 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
 
     try {
       final reqTimestamp = DateTime.now().millisecondsSinceEpoch;
+      final reqId = IceConfigService.generateId('req');
+      final customTurnOnly = await IceConfigService.getCustomTurnServers();
       _isLanConnection = false;
 
-      // Request fresh offer via LAN and Cloud Relay
-      _localLan.sendDisconnectToLan();
-      _signaling.requestFreshOffer(roomCode, reqTimestamp);
-
       Map<String, dynamic>? offerData;
+      bool sentCloudRequest = false;
+      final Set<String> triedOfferIds = {};
 
-      for (int attempt = 1; attempt <= 40; attempt++) {
+      for (int attempt = 1; attempt <= 35; attempt++) {
         if (!mounted || !_isConnecting) return;
         setState(() {
-          _statusText = 'बच्चे के फोन से सिग्नल खोज रहे हैं... ($attempt/40)';
+          _statusText = 'बच्चे के फोन से सिग्नल खोज रहे हैं... ($attempt/35)';
         });
 
-        // 1. Direct Wi-Fi LAN search (Instant <200ms when both phones are on same Wi-Fi)
-        try {
-          final lanOffer = await _localLan.discoverOnLan(roomCode, requestFresh: attempt == 1 || attempt % 3 == 0);
-          if (lanOffer != null && lanOffer['sdp'] != null && (lanOffer['sdp'] as String).isNotEmpty) {
-            offerData = lanOffer;
-            _isLanConnection = true;
-            debugPrint("🎯 [Parent] Discovered Child via Direct Wi-Fi LAN!");
-            break;
-          }
-        } catch (_) {}
+        // 1. Direct Wi-Fi LAN search (Instant when both phones are on same Wi-Fi)
+        if (attempt == 1 || attempt % 5 == 0) {
+          try {
+            final lanOffer = await _localLan.discoverOnLan(
+              roomCode,
+              requestFresh: true,
+              reqId: reqId,
+            );
+            if (lanOffer != null && lanOffer['sdp'] != null && (lanOffer['sdp'] as String).isNotEmpty) {
+              offerData = lanOffer;
+              _isLanConnection = true;
+              debugPrint("🎯 [Parent] Discovered Child via Direct Wi-Fi LAN!");
+              break;
+            }
+          } catch (_) {}
+        }
 
-        // 2. Cloud Relay search (ntfy.sh) - only accepts fresh offer generated around or after this connection attempt
-        offerData = await _signaling.getOffer(roomCode, minTimestamp: reqTimestamp - 3000);
+        // 2. Send Cloud request only if LAN didn't immediately connect (avoids race/teardown!)
+        if (!sentCloudRequest || attempt % 10 == 0) {
+          sentCloudRequest = true;
+          _signaling.requestFreshOffer(
+            roomCode,
+            reqTimestamp,
+            reqId: reqId,
+            turnServers: customTurnOnly,
+          );
+        }
+
+        // 3. Cloud Relay search (ntfy.sh) - wait up to ~6 attempts for fresh replyToReqId offer first!
+        offerData = await _signaling.getOffer(
+          roomCode,
+          reqId: reqId,
+          requireMatchingReqId: attempt <= 6,
+          excludeOfferIds: triedOfferIds,
+        );
         if (offerData != null && offerData['sdp'] != null && (offerData['sdp'] as String).isNotEmpty) {
           debugPrint("🎯 [Parent] Discovered Child via Cloud Relay!");
           break;
         }
 
-        await Future.delayed(const Duration(milliseconds: 1000));
+        await Future.delayed(const Duration(milliseconds: 1100));
       }
 
       if (offerData == null || offerData['sdp'] == null) {
-        setState(() {
-          _isConnecting = false;
-          _statusText = '⚠️ कोड $roomCode पर कोई एक्टिव स्क्रीन शेयर नहीं मिला।\nजांचें कि बच्चे के फोन में वही कोड ($roomCode) है और स्क्रीन शेयर चालू है।';
-        });
+        if (mounted) {
+          setState(() {
+            _isConnecting = false;
+            _statusText = '⚠️ कोड $roomCode पर कोई एक्टिव स्क्रीन शेयर नहीं मिला।\nजांचें कि बच्चे के फोन में वही कोड ($roomCode) है और स्क्रीन शेयर चालू है।';
+          });
+        }
         return;
       }
 
-      setState(() {
-        _statusText = _isLanConnection
-            ? '⚡ वाई-फाई डायरेक्ट सिग्नल मिल गया! स्क्रीन लोड हो रही है...'
-            : '✅ बच्चे का क्लाउड सिग्नल मिल गया! लाइव स्क्रीन कनेक्ट हो रही है...';
-      });
+      _activeOfferId = offerData['offerId']?.toString();
 
-      _peerConnection = await createPeerConnection(_iceServers);
+      List<Map<String, dynamic>>? childTurnServers;
+      if (offerData['turnServers'] is List) {
+        childTurnServers = (offerData['turnServers'] as List)
+            .whereType<Map>()
+            .map((m) => Map<String, dynamic>.from(m))
+            .toList();
+      }
+
+      if (mounted) {
+        setState(() {
+          _statusText = _isLanConnection
+              ? '⚡ वाई-फाई डायरेक्ट सिग्नल मिल गया! स्क्रीन लोड हो रही है...'
+              : '✅ बच्चे का क्लाउड सिग्नल मिल गया! लाइव स्क्रीन कनेक्ट हो रही है...';
+        });
+      }
+
+      final iceConfig = await IceConfigService.buildIceConfig(extraTurnServers: childTurnServers);
+      _peerConnection = await createPeerConnection(iceConfig);
 
       // DataChannel listener on Parent
       _peerConnection!.onDataChannel = (RTCDataChannel channel) {
@@ -2274,9 +2870,11 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
               _isConnected = true;
               _isConnecting = false;
               _statusText = '🟢 लाइव स्ट्रीम कनेक्ट हो गई!';
-            } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
-                state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
-              _statusText = '⚠️ कनेक्शन टूट गया। पुनः प्रयास करें।';
+            } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+              _statusText = '🔄 नेटवर्क अस्थायी रूप से धीमा है — पुनः जुड़ने की प्रतीक्षा...';
+            } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+              _isConnecting = false;
+              _statusText = '❌ कनेक्शन असफल! मोबाइल डेटा (CGNAT) होने पर ऊपर 📡 TURN सेटिंग में फ्री Relay जोड़ें।';
             }
           });
         }
@@ -2304,6 +2902,11 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
         } else if (event.track.kind == 'audio') {
           _remoteAudioTrack = event.track;
           _remoteAudioTrack!.enabled = _isLiveAudioOn;
+          if (_isLiveAudioOn) {
+            try {
+              await Helper.setSpeakerphoneOn(true);
+            } catch (_) {}
+          }
           debugPrint("🎙️ [Parent] Audio track registered: enabled=$_isLiveAudioOn");
         }
       };
@@ -2313,13 +2916,13 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
           if (_isLanConnection) {
             _localLan.sendCandidateToLan(candidate);
           }
-          _signaling.sendCandidate(
-            roomCode,
-            candidate.candidate!,
-            candidate.sdpMid,
-            candidate.sdpMLineIndex,
-            'parent',
-          );
+          _outgoingCandidateBuffer.add({
+            'candidate': candidate.candidate,
+            'sdpMid': candidate.sdpMid,
+            'sdpMLineIndex': candidate.sdpMLineIndex,
+            'timestamp': DateTime.now().millisecondsSinceEpoch,
+          });
+          _scheduleParentCandidateBatchFlush(roomCode, _activeOfferId);
         }
       };
 
@@ -2338,16 +2941,22 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
 
       // Send Answer to both LAN (if connected) and Cloud Relay
       if (_isLanConnection) {
-        _localLan.sendAnswerToLan(answer.sdp!, answer.type!);
+        await _localLan.sendAnswerToLan(answer.sdp!, answer.type!);
       }
-      await _signaling.sendAnswer(roomCode, answer.sdp!, answer.type!);
+      await _signaling.sendAnswer(
+        roomCode,
+        answer.sdp!,
+        answer.type!,
+        offerId: _activeOfferId,
+      );
 
-      _lastCandidateTimestamp = reqTimestamp - 1000;
-      _startListeningToKidIceCandidates(roomCode);
+      _startListeningToKidIceCandidates(roomCode, _activeOfferId);
 
-      setState(() {
-        _statusText = 'उत्तर भेजा गया! वीडियो लोड हो रहा है...';
-      });
+      if (mounted) {
+        setState(() {
+          _statusText = 'उत्तर भेजा गया! वीडियो लोड हो रहा है...';
+        });
+      }
     } catch (e) {
       debugPrint('Parent connection error: $e');
       if (mounted) {
@@ -2359,25 +2968,33 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     }
   }
 
-  void _startListeningToKidIceCandidates(String roomCode) {
+  void _startListeningToKidIceCandidates(String roomCode, String? expectedOfferId) {
     _candidatePollTimer?.cancel();
-    _candidatePollTimer = Timer.periodic(const Duration(milliseconds: 1500), (timer) async {
+    _candidatePollTimer = Timer.periodic(const Duration(milliseconds: 1400), (timer) async {
       if (_peerConnection == null) {
         timer.cancel();
         return;
       }
 
-      final list = await _signaling.getCandidates(roomCode, 'parent', _lastCandidateTimestamp);
-      for (final item in list) {
+      final List<Map<String, dynamic>> combined = [];
+      if (_isLanConnection) {
+        final lanCands = await _localLan.fetchCandidatesFromLan();
+        combined.addAll(lanCands);
+      }
+      final cloudCands = await _signaling.getCandidates(
+        roomCode,
+        'parent',
+        expectedOfferId: expectedOfferId,
+      );
+      combined.addAll(cloudCands);
+
+      for (final item in combined) {
         final cStr = item['candidate'] as String?;
         final sdpMid = item['sdpMid'] as String?;
         final sdpMLineIndex = item['sdpMLineIndex'] as int?;
-        final ts = item['timestamp'] as int? ?? 0;
-        if (ts > _lastCandidateTimestamp) {
-          _lastCandidateTimestamp = ts;
-        }
 
-        if (cStr != null) {
+        if (cStr != null && !_addedRemoteCandidateKeys.contains(cStr)) {
+          _addedRemoteCandidateKeys.add(cStr);
           final candidate = RTCIceCandidate(cStr, sdpMid, sdpMLineIndex);
           if (_isRemoteDescSet) {
             try {
@@ -2393,15 +3010,30 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     });
   }
 
-  void _disconnect() {
+  void _cleanupConnectionOnly({bool emitDisconnect = false}) {
     final roomCode = _codeController.text.trim().toUpperCase();
     _candidatePollTimer?.cancel();
+    _candidatePollTimer = null;
+    _candidateFlushTimer?.cancel();
+    _candidateFlushTimer = null;
     _touchFeedbackTimer?.cancel();
-    _localLan.sendDisconnectToLan();
-    _localLan.stop();
-    if (roomCode.isNotEmpty) {
-      _signaling.sendDisconnect(roomCode);
+    _touchFeedbackTimer = null;
+    _outgoingCandidateBuffer.clear();
+    _addedRemoteCandidateKeys.clear();
+    final activeOfferId = _activeOfferId;
+    _activeOfferId = null;
+
+    if (emitDisconnect) {
+      _localLan.sendDisconnectToLan();
+      if (roomCode.isNotEmpty) {
+        _signaling.sendDisconnect(roomCode, offerId: activeOfferId);
+      }
     }
+    _localLan.stop();
+
+    try {
+      Helper.setSpeakerphoneOn(false);
+    } catch (_) {}
     try {
       _parentDataChannel?.close();
     } catch (_) {}
@@ -2415,7 +3047,6 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     _remoteRenderer.srcObject = null;
     _isRemoteDescSet = false;
     _queuedCandidates.clear();
-    _lastCandidateTimestamp = DateTime.now().millisecondsSinceEpoch;
     if (mounted) {
       setState(() {
         _isConnected = false;
@@ -2429,6 +3060,10 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
         _statusText = 'डिस्कनेक्ट हो गया।';
       });
     }
+  }
+
+  void _disconnect() {
+    _cleanupConnectionOnly(emitDisconnect: true);
   }
 
   @override
@@ -2448,6 +3083,11 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
         title: const Text('माता-पिता का लाइव मॉनिटर'),
         backgroundColor: const Color(0xFF1E293B),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.cell_tower, color: Colors.cyanAccent),
+            tooltip: 'मोबाइल डेटा TURN सेटिंग',
+            onPressed: () => showTurnSettingsDialog(context),
+          ),
           if (_isConnected || _isConnecting)
             IconButton(
               icon: const Icon(Icons.refresh),

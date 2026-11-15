@@ -234,6 +234,9 @@ flutter {
     <!-- Screen Recording & WebRTC Permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
@@ -245,11 +248,13 @@ flutter {
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
         android:label="KidGuard Live"
         android:name="\${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">
 
         <activity
             android:name=".MainActivity"
@@ -303,9 +308,12 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -320,6 +328,47 @@ class MainActivity: FlutterActivity() {
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
+                "isIgnoringBatteryOptimizations" -> {
+                    try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+                            result.success(pm?.isIgnoringBatteryOptimizations(packageName) == true)
+                        } else {
+                            result.success(true)
+                        }
+                    } catch (_: Exception) {
+                        result.success(false)
+                    }
+                }
+                "requestIgnoreBatteryOptimizations" -> {
+                    try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+                            if (pm?.isIgnoringBatteryOptimizations(packageName) == true) {
+                                result.success(true)
+                                return@setMethodCallHandler
+                            }
+                            try {
+                                val intent = Intent(
+                                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                    Uri.parse("package:\$packageName")
+                                )
+                                startActivity(intent)
+                                result.success(true)
+                                return@setMethodCallHandler
+                            } catch (_: Exception) {
+                                val fallback = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                                startActivity(fallback)
+                                result.success(true)
+                                return@setMethodCallHandler
+                            }
+                        }
+                        result.success(true)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        result.success(false)
+                    }
+                }
                 "startForegroundService" -> {
                     try {
                         val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
@@ -455,6 +504,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.projection.MediaProjection
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -476,6 +526,7 @@ class ScreenCaptureService : Service() {
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -494,12 +545,13 @@ class ScreenCaptureService : Service() {
             }
             ACTION_STOP -> {
                 cleanupAndStop()
+                return START_NOT_STICKY
             }
             else -> {
                 startForegroundSafe(allowMediaProjection = false)
             }
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     private fun hasRecordAudioPermission(): Boolean {
@@ -524,6 +576,40 @@ class ScreenCaptureService : Service() {
         } catch (pEx: Exception) {
             Log.w("ScreenCaptureService", "WakeLock notice: \${pEx.message}")
         }
+
+        try {
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            if (wifiLock == null) {
+                val lockType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                } else {
+                    @Suppress("DEPRECATION")
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                }
+                wifiLock = wifiManager?.createWifiLock(lockType, "KidGuard::LiveNetworkWifiLock")
+                wifiLock?.setReferenceCounted(false)
+            }
+            if (wifiLock?.isHeld != true) {
+                wifiLock?.acquire()
+            }
+        } catch (wEx: Exception) {
+            Log.w("ScreenCaptureService", "WifiLock notice: \${wEx.message}")
+        }
+    }
+
+    private fun releaseLocks() {
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+            wakeLock = null
+        } catch (_: Exception) {}
+        try {
+            if (wifiLock?.isHeld == true) {
+                wifiLock?.release()
+            }
+            wifiLock = null
+        } catch (_: Exception) {}
     }
 
     private fun startForegroundSafe(allowMediaProjection: Boolean) {
@@ -610,12 +696,7 @@ class ScreenCaptureService : Service() {
         try {
             activeMediaProjection?.stop()
             activeMediaProjection = null
-            try {
-                if (wakeLock?.isHeld == true) {
-                    wakeLock?.release()
-                }
-                wakeLock = null
-            } catch (_: Exception) {}
+            releaseLocks()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
             } else {
@@ -646,12 +727,7 @@ class ScreenCaptureService : Service() {
         try {
             activeMediaProjection?.stop()
             activeMediaProjection = null
-            try {
-                if (wakeLock?.isHeld == true) {
-                    wakeLock?.release()
-                }
-                wakeLock = null
-            } catch (_: Exception) {}
+            releaseLocks()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
             } else {

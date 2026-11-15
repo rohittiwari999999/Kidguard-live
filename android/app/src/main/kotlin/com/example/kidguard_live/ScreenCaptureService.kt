@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.projection.MediaProjection
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -41,6 +42,7 @@ class ScreenCaptureService : Service() {
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -61,13 +63,14 @@ class ScreenCaptureService : Service() {
             }
             ACTION_STOP -> {
                 cleanupAndStop()
+                return START_NOT_STICKY
             }
             else -> {
-                // Ensure startForeground contract is always satisfied if started without action
+                // Ensure startForeground contract is always satisfied if started without action or restarted
                 startForegroundSafe(allowMediaProjection = false)
             }
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     private fun hasRecordAudioPermission(): Boolean {
@@ -92,6 +95,40 @@ class ScreenCaptureService : Service() {
         } catch (pEx: Exception) {
             Log.w("ScreenCaptureService", "WakeLock notice: ${pEx.message}")
         }
+
+        try {
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            if (wifiLock == null) {
+                val lockType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                } else {
+                    @Suppress("DEPRECATION")
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                }
+                wifiLock = wifiManager?.createWifiLock(lockType, "KidGuard::LiveNetworkWifiLock")
+                wifiLock?.setReferenceCounted(false)
+            }
+            if (wifiLock?.isHeld != true) {
+                wifiLock?.acquire()
+            }
+        } catch (wEx: Exception) {
+            Log.w("ScreenCaptureService", "WifiLock notice: ${wEx.message}")
+        }
+    }
+
+    private fun releaseLocks() {
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+            wakeLock = null
+        } catch (_: Exception) {}
+        try {
+            if (wifiLock?.isHeld == true) {
+                wifiLock?.release()
+            }
+            wifiLock = null
+        } catch (_: Exception) {}
     }
 
     private fun startForegroundSafe(allowMediaProjection: Boolean) {
@@ -191,12 +228,7 @@ class ScreenCaptureService : Service() {
         try {
             activeMediaProjection?.stop()
             activeMediaProjection = null
-            try {
-                if (wakeLock?.isHeld == true) {
-                    wakeLock?.release()
-                }
-                wakeLock = null
-            } catch (_: Exception) {}
+            releaseLocks()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
             } else {
@@ -227,12 +259,7 @@ class ScreenCaptureService : Service() {
         try {
             activeMediaProjection?.stop()
             activeMediaProjection = null
-            try {
-                if (wakeLock?.isHeld == true) {
-                    wakeLock?.release()
-                }
-                wakeLock = null
-            } catch (_: Exception) {}
+            releaseLocks()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
             } else {
