@@ -1311,7 +1311,19 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       });
 
       try {
-        await _platformChannel.invokeMethod('prepareScreenCapture');
+        final ready = await _platformChannel.invokeMethod('prepareScreenCapture');
+        if (ready != true) {
+          try {
+            await _peerConnection?.close();
+          } catch (_) {}
+          _peerConnection = null;
+          if (mounted) {
+            setState(() {
+              _statusMessage = 'स्क्रीन शेयर अनुमति रद्द कर दी गई।';
+            });
+          }
+          return;
+        }
       } catch (nativeErr) {
         debugPrint('prepareScreenCapture notice: $nativeErr');
       }

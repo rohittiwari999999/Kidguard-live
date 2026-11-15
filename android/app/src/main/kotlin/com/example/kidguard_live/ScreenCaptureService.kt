@@ -116,14 +116,17 @@ class ScreenCaptureService : Service() {
                 // Android 14, 15, 16 (API 34+): Try safest highest-privilege combination first,
                 // then gracefully fall back so startForeground NEVER fails or throws SecurityException.
                 val candidates = mutableListOf<Int>()
-                if (allowMediaProjection && micGranted) {
-                    candidates.add(
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
-                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
-                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                    )
+                if (allowMediaProjection) {
+                    if (micGranted) {
+                        candidates.add(
+                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
+                                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                        )
+                    }
+                    candidates.add(ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
                 }
                 if (micGranted) {
+                    candidates.add(ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
                     candidates.add(
                         ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
                             ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
@@ -150,10 +153,15 @@ class ScreenCaptureService : Service() {
                     }
                 }
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                val fgType = if (micGranted) {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                } else {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                val fgType = when {
+                    allowMediaProjection && micGranted ->
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    allowMediaProjection ->
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                    micGranted ->
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    else ->
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
                 }
                 try {
                     startForeground(NOTIFICATION_ID, notification, fgType)
@@ -161,8 +169,13 @@ class ScreenCaptureService : Service() {
                     startForeground(NOTIFICATION_ID, notification)
                 }
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val fgType = if (allowMediaProjection) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                } else {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                }
                 try {
-                    startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                    startForeground(NOTIFICATION_ID, notification, fgType)
                 } catch (ex: Exception) {
                     startForeground(NOTIFICATION_ID, notification)
                 }

@@ -299,21 +299,28 @@ flutter {
   const mainActivityKtCode = `// android/app/src/main/kotlin/com/example/kidguard_live/MainActivity.kt
 package com.example.kidguard_live
 
+import android.app.Activity
+import android.content.Context
 import android.content.Intent
+import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.example.kidguard_live/screen_capture"
+    private val REQUEST_SCREEN_CAPTURE = 2001
+    private var pendingResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
-                "startForegroundService", "prepareScreenCapture" -> {
+                "startForegroundService" -> {
                     try {
                         val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
                             action = ScreenCaptureService.ACTION_START
@@ -327,6 +334,40 @@ class MainActivity: FlutterActivity() {
                     } catch (e: Exception) {
                         e.printStackTrace()
                         result.success(true)
+                    }
+                }
+                "prepareScreenCapture" -> {
+                    try {
+                        try {
+                            val preIntent = Intent(this, ScreenCaptureService::class.java).apply {
+                                action = ScreenCaptureService.ACTION_START
+                            }
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                startForegroundService(preIntent)
+                            } else {
+                                startService(preIntent)
+                            }
+                        } catch (svcEx: Exception) {
+                            svcEx.printStackTrace()
+                        }
+
+                        pendingResult?.let { stale ->
+                            try {
+                                stale.success(false)
+                            } catch (_: Exception) {}
+                        }
+                        pendingResult = result
+
+                        val mediaProjectionManager =
+                            getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                        startActivityForResult(
+                            mediaProjectionManager.createScreenCaptureIntent(),
+                            REQUEST_SCREEN_CAPTURE
+                        )
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        pendingResult = null
+                        result.error("ERROR", e.message, null)
                     }
                 }
                 "upgradeScreenCaptureService" -> {
@@ -360,6 +401,41 @@ class MainActivity: FlutterActivity() {
                     result.success(true)
                 }
                 else -> result.notImplemented()
+            }
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_SCREEN_CAPTURE) {
+            val callback = pendingResult
+            pendingResult = null
+            if (resultCode == Activity.RESULT_OK && data != null) {
+                try {
+                    val upgradeIntent = Intent(this, ScreenCaptureService::class.java).apply {
+                        action = ScreenCaptureService.ACTION_UPGRADE
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(upgradeIntent)
+                    } else {
+                        startService(upgradeIntent)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+
+                Handler(Looper.getMainLooper()).postDelayed({
+                    try {
+                        callback?.success(true)
+                    } catch (_: Exception) {}
+                }, 450)
+            } else {
+                try {
+                    stopService(Intent(this, ScreenCaptureService::class.java))
+                } catch (_: Exception) {}
+                try {
+                    callback?.success(false)
+                } catch (_: Exception) {}
             }
         }
     }
@@ -469,14 +545,17 @@ class ScreenCaptureService : Service() {
 
             if (Build.VERSION.SDK_INT >= 34) {
                 val candidates = mutableListOf<Int>()
-                if (allowMediaProjection && micGranted) {
-                    candidates.add(
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
-                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
-                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                    )
+                if (allowMediaProjection) {
+                    if (micGranted) {
+                        candidates.add(
+                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
+                                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                        )
+                    }
+                    candidates.add(ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
                 }
                 if (micGranted) {
+                    candidates.add(ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
                     candidates.add(
                         ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
                             ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
@@ -493,10 +572,15 @@ class ScreenCaptureService : Service() {
                     }
                 }
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                val fgType = if (micGranted) {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                } else {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                val fgType = when {
+                    allowMediaProjection && micGranted ->
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    allowMediaProjection ->
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                    micGranted ->
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    else ->
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
                 }
                 try {
                     startForeground(NOTIFICATION_ID, notification, fgType)
@@ -504,8 +588,13 @@ class ScreenCaptureService : Service() {
                     startForeground(NOTIFICATION_ID, notification)
                 }
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val fgType = if (allowMediaProjection) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                } else {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                }
                 try {
-                    startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                    startForeground(NOTIFICATION_ID, notification, fgType)
                 } catch (ex: Exception) {
                     startForeground(NOTIFICATION_ID, notification)
                 }
