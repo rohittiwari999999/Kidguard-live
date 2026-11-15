@@ -242,6 +242,7 @@ flutter {
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
@@ -265,16 +266,27 @@ flutter {
             </intent-filter>
         </activity>
 
-        <!-- General Watchdog Foreground Service (dataSync type) -->
+        <!-- Official flutter_webrtc Screen Capture Foreground Services (Crucial for Android 14/15/16) -->
+        <service
+            android:name="com.cloudwebrtc.webrtc.ForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <service
+            android:name="com.google.webrtc.audio.WebRtcAudioService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- General Watchdog Foreground Service (dataSync type - safe for flutter_foreground_task) -->
         <service
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
             android:foregroundServiceType="dataSync"
             android:stopWithTask="true" />
 
-        <!-- Native Android Screen Streaming Helper Foreground Service (mediaProjection type for Android 14/15/16) -->
+        <!-- Native Android Screen Streaming Helper Foreground Service (dataSync first, then mic & mediaProjection) -->
         <service
             android:name=".ScreenCaptureService"
-            android:foregroundServiceType="mediaProjection"
+            android:foregroundServiceType="dataSync|microphone|mediaProjection"
             android:exported="false" />
 
         <meta-data
@@ -287,44 +299,61 @@ flutter {
   const mainActivityKtCode = `// android/app/src/main/kotlin/com/example/kidguard_live/MainActivity.kt
 package com.example.kidguard_live
 
-import android.app.Activity
-import android.content.Context
 import android.content.Intent
-import android.media.projection.MediaProjectionManager
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.example.kidguard_live/screen_capture"
-    private val REQUEST_SCREEN_CAPTURE = 2001
-    private var pendingResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
-                "prepareScreenCapture" -> {
+                "startForegroundService", "prepareScreenCapture" -> {
                     try {
-                        pendingResult = result
-                        val mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                        startActivityForResult(mediaProjectionManager.createScreenCaptureIntent(), REQUEST_SCREEN_CAPTURE)
+                        val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
+                            action = ScreenCaptureService.ACTION_START
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            startForegroundService(serviceIntent)
+                        } else {
+                            startService(serviceIntent)
+                        }
+                        result.success(true)
                     } catch (e: Exception) {
                         e.printStackTrace()
-                        result.error("ERROR", e.message, null)
-                        pendingResult = null
+                        result.success(true)
                     }
+                }
+                "upgradeScreenCaptureService" -> {
+                    try {
+                        val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
+                            action = ScreenCaptureService.ACTION_UPGRADE
+                        }
+                        startService(serviceIntent)
+                    } catch (e: Exception) {
+                        try {
+                            val fallbackIntent = Intent(this, ScreenCaptureService::class.java).apply {
+                                action = ScreenCaptureService.ACTION_UPGRADE
+                            }
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                startForegroundService(fallbackIntent)
+                            } else {
+                                startService(fallbackIntent)
+                            }
+                        } catch (inner: Exception) {
+                            inner.printStackTrace()
+                        }
+                    }
+                    result.success(true)
                 }
                 "stopScreenCapture" -> {
                     try {
-                        val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
-                            action = ScreenCaptureService.ACTION_STOP
-                        }
-                        startService(serviceIntent)
+                        stopService(Intent(this, ScreenCaptureService::class.java))
                     } catch (e: Exception) {
                         e.printStackTrace()
                     }
@@ -334,62 +363,43 @@ class MainActivity: FlutterActivity() {
             }
         }
     }
-
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQUEST_SCREEN_CAPTURE) {
-            if (resultCode == Activity.RESULT_OK && data != null) {
-                try {
-                    // Start Foreground Service with type mediaProjection immediately upon user consent!
-                    val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
-                        action = ScreenCaptureService.ACTION_START
-                    }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        startForegroundService(serviceIntent)
-                    } else {
-                        startService(serviceIntent)
-                    }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-
-                // Give the service 400ms to establish foreground state before resolving Flutter promise
-                Handler(Looper.getMainLooper()).postDelayed({
-                    pendingResult?.success(true)
-                    pendingResult = null
-                }, 400)
-            } else {
-                pendingResult?.error("DENIED", "Screen capture permission denied", null)
-                pendingResult = null
-            }
-        }
-    }
 }
 `;
 
   const screenCaptureServiceKtCode = `// android/app/src/main/kotlin/com/example/kidguard_live/ScreenCaptureService.kt
 package com.example.kidguard_live
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.projection.MediaProjection
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
+import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 
 class ScreenCaptureService : Service() {
 
     companion object {
         const val ACTION_START = "ACTION_START"
+        const val ACTION_UPGRADE = "ACTION_UPGRADE"
         const val ACTION_STOP = "ACTION_STOP"
         const val CHANNEL_ID = "kidguard_screen_channel"
         const val NOTIFICATION_ID = 1001
+
+        var activeMediaProjection: MediaProjection? = null
+            private set
     }
+
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -401,59 +411,129 @@ class ScreenCaptureService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                startForegroundWithNotification()
+                startForegroundSafe(allowMediaProjection = false)
+            }
+            ACTION_UPGRADE -> {
+                startForegroundSafe(allowMediaProjection = true)
             }
             ACTION_STOP -> {
-                try {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                        stopForeground(STOP_FOREGROUND_REMOVE)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        stopForeground(true)
-                    }
-                    stopSelf()
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+                cleanupAndStop()
+            }
+            else -> {
+                startForegroundSafe(allowMediaProjection = false)
             }
         }
         return START_NOT_STICKY
     }
 
-    private fun startForegroundWithNotification() {
+    private fun hasRecordAudioPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun acquireWakeLock() {
         try {
-            val stopIntent = Intent(this, ScreenCaptureService::class.java).apply {
-                action = ACTION_STOP
+            val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            if (wakeLock == null) {
+                wakeLock = powerManager?.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "KidGuard::LiveAudioWakeLock"
+                )
             }
-            val stopPendingIntent = PendingIntent.getService(
-                this,
-                0,
-                stopIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
+            if (wakeLock?.isHeld != true) {
+                wakeLock?.acquire(24 * 60 * 60 * 1000L)
+            }
+        } catch (pEx: Exception) {
+            Log.w("ScreenCaptureService", "WakeLock notice: \${pEx.message}")
+        }
+    }
+
+    private fun startForegroundSafe(allowMediaProjection: Boolean) {
+        try {
+            acquireWakeLock()
+
+            val safeIcon = applicationInfo.icon.takeIf { it != 0 } ?: android.R.drawable.ic_dialog_info
 
             val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("KidGuard Live: स्क्रीन लाइव प्रसारित हो रही है")
-                .setContentText("माता-पिता के फोन पर लाइव दिख रही है (पृष्ठभूमि सेवा सक्रिय)")
-                .setSmallIcon(android.R.drawable.ic_menu_camera)
+                .setContentTitle("KidGuard Live: स्क्रीन व लाइव माइक सक्रिय है")
+                .setContentText("माता-पिता के फोन से सुरक्षित लाइव कनेक्टेड (बैकग्राउंड माइक चालू)")
+                .setSmallIcon(safeIcon)
                 .setOngoing(true)
+                .setAutoCancel(false)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
-                .addAction(android.R.drawable.ic_media_pause, "स्क्रीन शेयर रोकें", stopPendingIntent)
                 .build()
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                try {
-                    startForeground(
-                        NOTIFICATION_ID,
-                        notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            val micGranted = hasRecordAudioPermission()
+
+            if (Build.VERSION.SDK_INT >= 34) {
+                val candidates = mutableListOf<Int>()
+                if (allowMediaProjection && micGranted) {
+                    candidates.add(
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
+                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
                     )
-                } catch (typeEx: Exception) {
+                }
+                if (micGranted) {
+                    candidates.add(
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
+                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    )
+                }
+                candidates.add(ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+
+                for (fgType in candidates) {
+                    try {
+                        startForeground(NOTIFICATION_ID, notification, fgType)
+                        break
+                    } catch (ex: Exception) {
+                        Log.w("ScreenCaptureService", "startForeground type=\$fgType skipped: \${ex.message}")
+                    }
+                }
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val fgType = if (micGranted) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                } else {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                }
+                try {
+                    startForeground(NOTIFICATION_ID, notification, fgType)
+                } catch (ex: Exception) {
+                    startForeground(NOTIFICATION_ID, notification)
+                }
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                try {
+                    startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                } catch (ex: Exception) {
                     startForeground(NOTIFICATION_ID, notification)
                 }
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
+        } catch (e: Exception) {
+            Log.e("ScreenCaptureService", "startForegroundSafe error: \${e.message}")
+        }
+    }
+
+    private fun cleanupAndStop() {
+        try {
+            activeMediaProjection?.stop()
+            activeMediaProjection = null
+            try {
+                if (wakeLock?.isHeld == true) {
+                    wakeLock?.release()
+                }
+                wakeLock = null
+            } catch (_: Exception) {}
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+            stopSelf()
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -463,10 +543,10 @@ class ScreenCaptureService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "KidGuard स्क्रीन प्रसारण सेवा",
+                "KidGuard स्क्रीन व ऑडियो प्रसारण सेवा",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "स्क्रीन शेयरिंग के दौरान सक्रिय बैकग्राउंड सेवा"
+                description = "स्क्रीन और माइक्रोफोन शेयरिंग के दौरान सक्रिय बैकग्राउंड सेवा"
             }
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
             manager?.createNotificationChannel(channel)
@@ -475,6 +555,14 @@ class ScreenCaptureService : Service() {
 
     override fun onDestroy() {
         try {
+            activeMediaProjection?.stop()
+            activeMediaProjection = null
+            try {
+                if (wakeLock?.isHeld == true) {
+                    wakeLock?.release()
+                }
+                wakeLock = null
+            } catch (_: Exception) {}
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
             } else {

@@ -46,18 +46,18 @@
         <service
             android:name="com.google.webrtc.audio.WebRtcAudioService"
             android:exported="false"
-            android:foregroundServiceType="mediaProjection" />
+            android:foregroundServiceType="microphone" />
 
-        <!-- General Watchdog Foreground Service (mediaProjection type) -->
+        <!-- General Watchdog Foreground Service (dataSync type - safe for flutter_foreground_task) -->
         <service
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
-            android:foregroundServiceType="mediaProjection"
+            android:foregroundServiceType="dataSync"
             android:stopWithTask="true" />
 
-        <!-- Native Android Screen Streaming Helper Foreground Service (mediaProjection and dataSync for Android 14/15/16) -->
+        <!-- Native Android Screen Streaming Helper Foreground Service (dataSync first, then mic & mediaProjection) -->
         <service
             android:name=".ScreenCaptureService"
-            android:foregroundServiceType="mediaProjection|dataSync"
+            android:foregroundServiceType="dataSync|microphone|mediaProjection"
             android:exported="false" />
 
         <meta-data

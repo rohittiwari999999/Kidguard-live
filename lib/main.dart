@@ -981,6 +981,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
   RTCPeerConnection? _peerConnection;
   MediaStream? _screenStream;
   bool _isSharing = false;
+  bool _isStartingShare = false;
   String _statusMessage = 'तैयार है। स्क्रीन शेयर शुरू करें।';
   bool _isParentConnected = false;
   String _parentPin = '1234'; // Security PIN to stop broadcast or change settings
@@ -1266,6 +1267,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
   }
 
   Future<void> _startScreenShare() async {
+    if (_isStartingShare || _isSharing) return;
     final roomCode = _codeController.text.trim().toUpperCase();
     if (roomCode.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1274,14 +1276,25 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       return;
     }
 
+    _isStartingShare = true;
     try {
       setState(() {
         _statusMessage = 'अनुमतियां जांच रहे हैं...';
       });
 
       try {
-        await Permission.notification.request();
-        await [Permission.camera, Permission.microphone].request();
+        bool askedPerm = false;
+        if (!await Permission.notification.isGranted) {
+          await Permission.notification.request();
+          askedPerm = true;
+        }
+        if (!await Permission.microphone.isGranted) {
+          await Permission.microphone.request();
+          askedPerm = true;
+        }
+        if (askedPerm) {
+          await Future.delayed(const Duration(milliseconds: 250));
+        }
       } catch (permError) {
         debugPrint('Permission notice: $permError');
       }
@@ -1298,13 +1311,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       });
 
       try {
-        final ready = await _platformChannel.invokeMethod('prepareScreenCapture');
-        if (ready != true) {
-          setState(() {
-            _statusMessage = 'अनुमति नहीं मिली या रद्द कर दी गई।';
-          });
-          return;
-        }
+        await _platformChannel.invokeMethod('prepareScreenCapture');
       } catch (nativeErr) {
         debugPrint('prepareScreenCapture notice: $nativeErr');
       }
@@ -1317,6 +1324,16 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
       MediaStream stream = await navigator.mediaDevices.getDisplayMedia(mediaConstraints);
       _screenStream = stream;
 
+      // Allow Android 14/15/16 (HyperOS/FuntouchOS) Activity to finish resuming after system dialog
+      await Future.delayed(const Duration(milliseconds: 350));
+
+      // Safely upgrade foreground service now that screen share consent has been granted
+      try {
+        await _platformChannel.invokeMethod('upgradeScreenCaptureService');
+      } catch (upgradeErr) {
+        debugPrint('upgradeScreenCaptureService notice: $upgradeErr');
+      }
+
       stream.getVideoTracks().forEach((track) {
         track.onEnded = () {
           debugPrint('Screen capture track ended');
@@ -1326,13 +1343,26 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         };
       });
 
-      // Capture Microphone Audio for Parent Live Listening
+      // Capture Microphone Audio for Parent Live Listening with Android 14/15/16 fallback
       try {
-        _micStream = await navigator.mediaDevices.getUserMedia({'audio': true, 'video': false});
+        try {
+          _micStream = await navigator.mediaDevices.getUserMedia({
+            'audio': {
+              'mandatory': {
+                'echoCancellation': true,
+                'noiseSuppression': true,
+                'autoGainControl': true,
+              },
+            },
+            'video': false,
+          });
+        } catch (_) {
+          _micStream = await navigator.mediaDevices.getUserMedia({'audio': true, 'video': false});
+        }
         if (_micStream != null && _micStream!.getAudioTracks().isNotEmpty) {
           _micAudioTrack = _micStream!.getAudioTracks().first;
           _micAudioTrack!.enabled = _isMicActive;
-          debugPrint('🎙️ [Kid] Mic capture initialized');
+          debugPrint('🎙️ [Kid] Mic capture initialized: enabled=${_micAudioTrack!.enabled}');
         }
       } catch (micErr) {
         debugPrint('🎙️ [Kid] Mic capture note (non-fatal): $micErr');
@@ -1447,6 +1477,8 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
         );
       }
       _stopScreenShare();
+    } finally {
+      _isStartingShare = false;
     }
   }
 
@@ -1539,10 +1571,15 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> {
     try {
       await _platformChannel.invokeMethod('stopScreenCapture');
     } catch (_) {}
-    _screenStream?.getTracks().forEach((track) => track.stop());
+    try {
+      _screenStream?.getTracks().forEach((track) => track.stop());
+      await _screenStream?.dispose();
+    } catch (_) {}
     _screenStream = null;
-    _micAudioTrack?.stop();
-    _micStream?.dispose();
+    try {
+      _micAudioTrack?.stop();
+      await _micStream?.dispose();
+    } catch (_) {}
     _micAudioTrack = null;
     _micStream = null;
     try {

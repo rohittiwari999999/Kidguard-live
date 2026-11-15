@@ -13,8 +13,6 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.example.kidguard_live/screen_capture"
-    private val REQUEST_SCREEN_CAPTURE = 2001
-    private var pendingResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -34,15 +32,37 @@ class MainActivity: FlutterActivity() {
                         result.success(true)
                     } catch (e: Exception) {
                         e.printStackTrace()
-                        result.error("ERROR", e.message, null)
+                        // Non-fatal: return true so getDisplayMedia can still proceed safely
+                        result.success(true)
                     }
+                }
+                "upgradeScreenCaptureService" -> {
+                    try {
+                        val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
+                            action = ScreenCaptureService.ACTION_UPGRADE
+                        }
+                        // Service is already running in foreground; startService avoids
+                        // ForegroundServiceStartNotAllowedException during Activity resume transition
+                        startService(serviceIntent)
+                    } catch (e: Exception) {
+                        try {
+                            val fallbackIntent = Intent(this, ScreenCaptureService::class.java).apply {
+                                action = ScreenCaptureService.ACTION_UPGRADE
+                            }
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                startForegroundService(fallbackIntent)
+                            } else {
+                                startService(fallbackIntent)
+                            }
+                        } catch (inner: Exception) {
+                            inner.printStackTrace()
+                        }
+                    }
+                    result.success(true)
                 }
                 "stopScreenCapture" -> {
                     try {
-                        val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
-                            action = ScreenCaptureService.ACTION_STOP
-                        }
-                        startService(serviceIntent)
+                        stopService(Intent(this, ScreenCaptureService::class.java))
                     } catch (e: Exception) {
                         e.printStackTrace()
                     }
