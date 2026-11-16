@@ -9,11 +9,14 @@ import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math' show Random;
+import 'dart:typed_data';
 
 // -------------------------------------------------------------
 // ICE / STUN / TURN CONFIGURATION SERVICE (Mobile Data CGNAT Fix)
@@ -1308,6 +1311,7 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> with WidgetsBin
   MediaStream? _micStream;
   MediaStreamTrack? _micAudioTrack;
   bool _isMicActive = true;
+  bool _showQrCard = false;
   RTCDataChannel? _childDataChannel;
   Offset? _lastRemoteTouchPoint;
   String? _remoteActionFeedback;
@@ -1389,6 +1393,23 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> with WidgetsBin
           setState(() {
             _remoteActionFeedback = '👆 रिमोट नेविगेशन: $key';
           });
+        }
+        _resetFeedbackTimer();
+      } else if (type == 'ALERT') {
+        final msg = map['message'] as String? ?? 'माता-पिता का अलर्ट संदेश!';
+        HapticFeedback.heavyImpact();
+        SystemSound.play(SystemSoundType.alert);
+        if (mounted) {
+          setState(() {
+            _remoteActionFeedback = '🔔 माता-पिता का संदेश: $msg';
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('🔔 माता-पिता का अलर्ट: $msg'),
+              backgroundColor: Colors.amber.shade800,
+              duration: const Duration(seconds: 4),
+            ),
+          );
         }
         _resetFeedbackTimer();
       }
@@ -2391,18 +2412,18 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> with WidgetsBin
                     ),
 
                     const SizedBox(height: 12),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
+                    Wrap(
+                      alignment: WrapAlignment.center,
+                      spacing: 4,
                       children: [
                         TextButton.icon(
                           icon: const Icon(Icons.refresh, size: 18),
-                          label: const Text('🎲 नया रैंडम कोड'),
+                          label: const Text('🎲 नया कोड'),
                           onPressed: _isSharing ? null : _generateRandomCode,
                         ),
-                        const SizedBox(width: 8),
                         TextButton.icon(
                           icon: const Icon(Icons.copy, size: 18),
-                          label: const Text('कॉपी करें'),
+                          label: const Text('कॉपी'),
                           onPressed: () {
                             Clipboard.setData(ClipboardData(text: _codeController.text));
                             ScaffoldMessenger.of(context).showSnackBar(
@@ -2410,10 +2431,36 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> with WidgetsBin
                             );
                           },
                         ),
+                        TextButton.icon(
+                          icon: Icon(_showQrCard ? Icons.qr_code_2 : Icons.qr_code, size: 18, color: Colors.cyanAccent),
+                          label: Text(_showQrCard ? 'QR छुपाएं' : 'QR दिखाएं', style: const TextStyle(color: Colors.cyanAccent)),
+                          onPressed: () {
+                            setState(() {
+                              _showQrCard = !_showQrCard;
+                            });
+                          },
+                        ),
                       ],
                     ),
+                    if (_showQrCard) ...[
+                      const SizedBox(height: 10),
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: QrImageView(
+                          data: _codeController.text.trim().toUpperCase(),
+                          version: QrVersions.auto,
+                          size: 148,
+                          backgroundColor: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                    ],
                     const Text(
-                      'माता-पिता के फोन में यही समान कोड डालकर कनेक्ट करें।',
+                      'माता-पिता के फोन में यही कोड डालें या QR स्कैन करें।',
                       textAlign: TextAlign.center,
                       style: TextStyle(fontSize: 12, color: Colors.white70),
                     ),
@@ -2566,8 +2613,91 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> with WidgetsBin
 }
 
 // -------------------------------------------------------------
-// 2. PARENT LIVE MONITOR (Watches Child's Screen)
+// 2. PARENT LIVE MONITOR (Watches Child's Screen + Full Controls)
 // -------------------------------------------------------------
+class _CapturedSnap {
+  final Uint8List bytes;
+  final DateTime time;
+  _CapturedSnap(this.bytes, this.time);
+}
+
+class _QrScannerPage extends StatefulWidget {
+  const _QrScannerPage();
+
+  @override
+  State<_QrScannerPage> createState() => _QrScannerPageState();
+}
+
+class _QrScannerPageState extends State<_QrScannerPage> {
+  final MobileScannerController _controller = MobileScannerController(
+    detectionSpeed: DetectionSpeed.noDuplicates,
+    formats: const [BarcodeFormat.qrCode],
+  );
+  bool _handled = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  String _extractRoomCode(String raw) {
+    final trimmed = raw.trim();
+    try {
+      final uri = Uri.tryParse(trimmed);
+      if (uri != null && uri.queryParameters['room'] != null && uri.queryParameters['room']!.isNotEmpty) {
+        return uri.queryParameters['room']!.trim().toUpperCase();
+      }
+    } catch (_) {}
+    return trimmed.toUpperCase();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('बच्चे का QR कोड स्कैन करें'),
+        backgroundColor: const Color(0xFF1E293B),
+      ),
+      body: Stack(
+        children: [
+          MobileScanner(
+            controller: _controller,
+            onDetect: (BarcodeCapture capture) {
+              if (_handled) return;
+              for (final barcode in capture.barcodes) {
+                final raw = barcode.rawValue;
+                if (raw != null && raw.trim().isNotEmpty) {
+                  _handled = true;
+                  final code = _extractRoomCode(raw);
+                  Navigator.pop(context, code);
+                  break;
+                }
+              }
+            },
+          ),
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: Container(
+              margin: const EdgeInsets.all(20),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.black87,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: Colors.cyanAccent.withOpacity(0.6)),
+              ),
+              child: const Text(
+                'बच्चे के फोन पर दिख रहे QR कोड पर कैमरा रखें',
+                style: TextStyle(color: Colors.white, fontSize: 13),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class ParentLiveMonitor extends StatefulWidget {
   const ParentLiveMonitor({super.key});
 
@@ -2590,13 +2720,19 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
   String _iceState = 'None';
   String _videoResolution = '0x0';
 
-  // Remote Touch & Live Audio Controls
+  // Remote Touch, Live Audio, Zoom, Fullscreen, Screenshots, Timer & Alerts
   bool _isLiveAudioOn = false;
   bool _isRemoteTouchOn = false;
+  bool _isFullscreen = false;
+  double _zoomLevel = 1.0;
+  int _streamSeconds = 0;
+  Timer? _durationTimer;
   MediaStreamTrack? _remoteAudioTrack;
+  MediaStreamTrack? _remoteVideoTrack;
   RTCDataChannel? _parentDataChannel;
   Offset? _touchFeedbackPos;
   Timer? _touchFeedbackTimer;
+  final List<_CapturedSnap> _capturedSnaps = [];
 
   Timer? _candidatePollTimer;
   Timer? _candidateFlushTimer;
@@ -2619,10 +2755,60 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
           _videoResolution = '${_remoteRenderer.videoWidth}x${_remoteRenderer.videoHeight}';
           if (_remoteRenderer.videoWidth > 0 && _remoteRenderer.videoHeight > 0) {
             _hasRemoteVideo = true;
+            _isConnected = true;
+            _isConnecting = false;
+            _statusText = '🟢 लाइव स्क्रीन दिख रही है!';
+            _startDurationTimerIfNeeded();
           }
         });
       }
     };
+  }
+
+  void _startDurationTimerIfNeeded() {
+    if (_durationTimer != null && _durationTimer!.isActive) return;
+    _streamSeconds = 0;
+    _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      if (_isConnected || _hasRemoteVideo) {
+        setState(() {
+          _streamSeconds++;
+        });
+      }
+    });
+  }
+
+  String _formatDuration(int sec) {
+    final m = (sec ~/ 60).toString().padLeft(2, '0');
+    final s = (sec % 60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  Future<void> _openQrScanner() async {
+    try {
+      final status = await Permission.camera.request();
+      if (!status.isGranted) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('QR स्कैन के लिए कैमरा अनुमति आवश्यक है।')),
+          );
+        }
+        return;
+      }
+      if (!mounted) return;
+      final scannedCode = await Navigator.push<String>(
+        context,
+        MaterialPageRoute(builder: (_) => const _QrScannerPage()),
+      );
+      if (scannedCode != null && scannedCode.isNotEmpty && mounted) {
+        setState(() {
+          _codeController.text = scannedCode;
+        });
+        _connectToChild();
+      }
+    } catch (e) {
+      debugPrint('QR scan error: $e');
+    }
   }
 
   void _sendRemoteAction(Map<String, dynamic> actionData) {
@@ -2698,11 +2884,302 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     );
   }
 
+  void _cycleZoom() {
+    setState(() {
+      if (_zoomLevel == 1.0) {
+        _zoomLevel = 1.5;
+      } else if (_zoomLevel == 1.5) {
+        _zoomLevel = 2.0;
+      } else {
+        _zoomLevel = 1.0;
+      }
+    });
+  }
+
+  void _toggleFullscreen() {
+    setState(() {
+      _isFullscreen = !_isFullscreen;
+    });
+  }
+
+  Future<void> _captureScreenshot() async {
+    try {
+      MediaStreamTrack? track = _remoteVideoTrack;
+      if (track == null && _remoteRenderer.srcObject != null) {
+        final tracks = _remoteRenderer.srcObject!.getVideoTracks();
+        if (tracks.isNotEmpty) track = tracks.first;
+      }
+      if (track == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('अभी लाइव वीडियो ट्रैक उपलब्ध नहीं है।')),
+          );
+        }
+        return;
+      }
+      final ByteBuffer buf = await track.captureFrame();
+      final Uint8List bytes = buf.asUint8List();
+      if (bytes.isEmpty) return;
+
+      if (mounted) {
+        setState(() {
+          _capturedSnaps.insert(0, _CapturedSnap(bytes, DateTime.now()));
+          if (_capturedSnaps.length > 25) {
+            _capturedSnaps.removeLast();
+          }
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('📸 स्क्रीनशॉट सेव हुआ! (कुल: ${_capturedSnaps.length})'),
+            backgroundColor: Colors.blueAccent,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Screenshot error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('स्क्रीनशॉट त्रुटि: $e')),
+        );
+      }
+    }
+  }
+
+  void _showScreenshotsGallery() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF0F172A),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setModalState) {
+            return DraggableScrollableSheet(
+              expand: false,
+              initialChildSize: 0.65,
+              maxChildSize: 0.92,
+              minChildSize: 0.4,
+              builder: (_, scrollCtrl) {
+                return Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            '📸 स्क्रीनशॉट गैलरी (${_capturedSnaps.length})',
+                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                          ),
+                          if (_capturedSnaps.isNotEmpty)
+                            TextButton(
+                              onPressed: () {
+                                setState(() => _capturedSnaps.clear());
+                                setModalState(() {});
+                              },
+                              child: const Text('सभी हटाएं', style: TextStyle(color: Colors.redAccent)),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Expanded(
+                        child: _capturedSnaps.isEmpty
+                            ? const Center(
+                                child: Text(
+                                  'अभी कोई स्क्रीनशॉट नहीं लिया गया है।\n"📸 स्क्रीनशॉट" बटन दबाकर स्क्रीन कैप्चर करें।',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(color: Colors.white60, fontSize: 13),
+                                ),
+                              )
+                            : GridView.builder(
+                                controller: scrollCtrl,
+                                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                                  crossAxisCount: 2,
+                                  crossAxisSpacing: 10,
+                                  mainAxisSpacing: 10,
+                                  childAspectRatio: 0.62,
+                                ),
+                                itemCount: _capturedSnaps.length,
+                                itemBuilder: (_, i) {
+                                  final snap = _capturedSnaps[i];
+                                  final hh = snap.time.hour.toString().padLeft(2, '0');
+                                  final mm = snap.time.minute.toString().padLeft(2, '0');
+                                  final ss = snap.time.second.toString().padLeft(2, '0');
+                                  return Container(
+                                    decoration: BoxDecoration(
+                                      color: Colors.black,
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(color: Colors.white24),
+                                    ),
+                                    child: Column(
+                                      children: [
+                                        Expanded(
+                                          child: ClipRRect(
+                                            borderRadius: const BorderRadius.vertical(top: Radius.circular(11)),
+                                            child: GestureDetector(
+                                              onTap: () {
+                                                showDialog(
+                                                  context: context,
+                                                  builder: (_) => Dialog(
+                                                    backgroundColor: Colors.black,
+                                                    child: InteractiveViewer(
+                                                      child: Image.memory(snap.bytes, fit: BoxFit.contain),
+                                                    ),
+                                                  ),
+                                                );
+                                              },
+                                              child: Image.memory(snap.bytes, fit: BoxFit.cover, width: double.infinity),
+                                            ),
+                                          ),
+                                        ),
+                                        Padding(
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                          child: Row(
+                                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                            children: [
+                                              Text('$hh:$mm:$ss', style: const TextStyle(fontSize: 11, color: Colors.white70)),
+                                              InkWell(
+                                                onTap: () {
+                                                  setState(() => _capturedSnaps.removeAt(i));
+                                                  setModalState(() {});
+                                                },
+                                                child: const Icon(Icons.delete_outline, size: 18, color: Colors.redAccent),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  void _sendBuzzerAlert(String message) {
+    HapticFeedback.mediumImpact();
+    _sendRemoteAction({
+      'type': 'ALERT',
+      'message': message,
+    });
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('🔔 अलर्ट भेजा गया: $message'),
+          backgroundColor: Colors.amber.shade800,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  void _showBuzzerDialog() {
+    String customMsg = '';
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF1E293B),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: const Row(
+            children: [
+              Icon(Icons.notifications_active, color: Colors.amberAccent),
+              SizedBox(width: 8),
+              Flexible(
+                child: Text('बच्चे को अलर्ट / बज़र भेजें', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+              ),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text('त्वरित संदेश चुनें:', style: TextStyle(color: Colors.white70, fontSize: 12)),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    ActionChip(
+                      label: const Text('📚 पढ़ाई पर ध्यान दो!', style: TextStyle(fontSize: 12)),
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        _sendBuzzerAlert('📚 पढ़ाई पर ध्यान दो!');
+                      },
+                    ),
+                    ActionChip(
+                      label: const Text('🍲 खाना खाने आ जाओ', style: TextStyle(fontSize: 12)),
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        _sendBuzzerAlert('🍲 खाना खाने आ जाओ');
+                      },
+                    ),
+                    ActionChip(
+                      label: const Text('📞 मम्मी/पापा को कॉल करो', style: TextStyle(fontSize: 12)),
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        _sendBuzzerAlert('📞 मम्मी/पापा को कॉल करो');
+                      },
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  maxLines: 2,
+                  onChanged: (v) => customMsg = v,
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                  decoration: InputDecoration(
+                    labelText: 'कस्टम संदेश लिखें',
+                    hintText: 'उदा. बेटा, अब फोन रख दो!',
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('रद्द करें', style: TextStyle(color: Colors.white60)),
+            ),
+            ElevatedButton.icon(
+              icon: const Icon(Icons.send, size: 16),
+              label: const Text('भेजें'),
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.amber.shade700, foregroundColor: Colors.white),
+              onPressed: () {
+                final txt = customMsg.trim();
+                Navigator.pop(ctx);
+                _sendBuzzerAlert(txt.isEmpty ? '🔔 माता-पिता आपको बुला रहे हैं!' : txt);
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   void _handleRemoteScreenTap(Offset localPos, BoxConstraints constraints) {
     if (!_isRemoteTouchOn) return;
 
-    final normX = (localPos.dx / constraints.maxWidth).clamp(0.0, 1.0);
-    final normY = (localPos.dy / constraints.maxHeight).clamp(0.0, 1.0);
+    final cx = constraints.maxWidth / 2.0;
+    final cy = constraints.maxHeight / 2.0;
+    final unzoomedX = cx + (localPos.dx - cx) / _zoomLevel;
+    final unzoomedY = cy + (localPos.dy - cy) / _zoomLevel;
+    final normX = (unzoomedX / constraints.maxWidth).clamp(0.0, 1.0);
+    final normY = (unzoomedY / constraints.maxHeight).clamp(0.0, 1.0);
 
     setState(() {
       _touchFeedbackPos = localPos;
@@ -2877,6 +3354,7 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
               _isConnected = true;
               _isConnecting = false;
               _statusText = '🟢 लाइव स्ट्रीम कनेक्ट हो गई!';
+              _startDurationTimerIfNeeded();
             } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
               _statusText = '🔄 नेटवर्क अस्थायी रूप से धीमा है — पुनः जुड़ने की प्रतीक्षा...';
             } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
@@ -2891,6 +3369,7 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
         debugPrint("🔥 Track received: ${event.track.kind}, Streams count: ${event.streams.length}");
 
         if (event.track.kind == 'video') {
+          _remoteVideoTrack = event.track;
           if (event.streams.isNotEmpty) {
             _remoteRenderer.srcObject = event.streams[0];
           } else {
@@ -2904,6 +3383,7 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
               _isConnected = true;
               _isConnecting = false;
               _statusText = '🟢 लाइव स्क्रीन दिख रही है!';
+              _startDurationTimerIfNeeded();
             });
           }
         } else if (event.track.kind == 'audio') {
@@ -2959,7 +3439,7 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
 
       _startListeningToKidIceCandidates(roomCode, _activeOfferId);
 
-      if (mounted) {
+      if (mounted && !_hasRemoteVideo && !_isConnected) {
         setState(() {
           _statusText = 'उत्तर भेजा गया! वीडियो लोड हो रहा है...';
         });
@@ -3017,7 +3497,7 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     });
   }
 
-  void _cleanupConnectionOnly({bool emitDisconnect = false}) {
+  void _cleanupConnectionOnly({bool emitDisconnect = false, bool updateUi = true}) {
     final roomCode = _codeController.text.trim().toUpperCase();
     _candidatePollTimer?.cancel();
     _candidatePollTimer = null;
@@ -3025,6 +3505,8 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     _candidateFlushTimer = null;
     _touchFeedbackTimer?.cancel();
     _touchFeedbackTimer = null;
+    _durationTimer?.cancel();
+    _durationTimer = null;
     _outgoingCandidateBuffer.clear();
     _addedRemoteCandidateKeys.clear();
     final activeOfferId = _activeOfferId;
@@ -3047,6 +3529,7 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     _parentDataChannel = null;
     _remoteAudioTrack?.stop();
     _remoteAudioTrack = null;
+    _remoteVideoTrack = null;
     try {
       _peerConnection?.close();
     } catch (_) {}
@@ -3054,13 +3537,16 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     _remoteRenderer.srcObject = null;
     _isRemoteDescSet = false;
     _queuedCandidates.clear();
-    if (mounted) {
+    if (updateUi && mounted) {
       setState(() {
         _isConnected = false;
         _isConnecting = false;
         _hasRemoteVideo = false;
         _isLiveAudioOn = false;
         _isRemoteTouchOn = false;
+        _isFullscreen = false;
+        _zoomLevel = 1.0;
+        _streamSeconds = 0;
         _touchFeedbackPos = null;
         _iceState = 'None';
         _videoResolution = '0x0';
@@ -3075,21 +3561,257 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
 
   @override
   void dispose() {
-    _disconnect();
+    _cleanupConnectionOnly(emitDisconnect: true, updateUi: false);
     _remoteRenderer.dispose();
     _codeController.dispose();
     super.dispose();
+  }
+
+  Widget _buildQuickActionChip({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.16),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: color.withOpacity(0.55)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 15, color: color),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildVideoFeedArea(bool isSessionConnected) {
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.circular(_isFullscreen ? 0 : 16),
+        border: _isFullscreen
+            ? null
+            : Border.all(
+                color: _hasRemoteVideo
+                    ? (_isRemoteTouchOn ? Colors.greenAccent : Colors.cyanAccent.withOpacity(0.5))
+                    : Colors.white24,
+                width: _isRemoteTouchOn ? 2 : 1,
+              ),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(_isFullscreen ? 0 : 16),
+        child: isSessionConnected
+            ? LayoutBuilder(
+                builder: (context, constraints) {
+                  final videoWidget = Transform.scale(
+                    scale: _zoomLevel,
+                    child: SizedBox.expand(
+                      child: RTCVideoView(
+                        _remoteRenderer,
+                        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                      ),
+                    ),
+                  );
+
+                  return Stack(
+                    children: [
+                      _isRemoteTouchOn
+                          ? videoWidget
+                          : InteractiveViewer(
+                              minScale: 1.0,
+                              maxScale: 4.0,
+                              child: videoWidget,
+                            ),
+
+                      // Interactive Gesture Detector for Remote Touch
+                      if (_isRemoteTouchOn)
+                        Positioned.fill(
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTapDown: (details) => _handleRemoteScreenTap(details.localPosition, constraints),
+                            child: Container(color: Colors.transparent),
+                          ),
+                        ),
+
+                      // Live timer badge
+                      Positioned(
+                        top: 8,
+                        left: 8,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.68),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(color: Colors.redAccent.withOpacity(0.6)),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.circle, size: 8, color: Colors.redAccent),
+                              const SizedBox(width: 5),
+                              Text(
+                                'LIVE • ${_formatDuration(_streamSeconds)}',
+                                style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+
+                      // Top-right fullscreen toggle overlay
+                      Positioned(
+                        top: 8,
+                        right: 8,
+                        child: InkWell(
+                          onTap: _toggleFullscreen,
+                          child: Container(
+                            padding: const EdgeInsets.all(6),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withOpacity(0.68),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(color: Colors.white24),
+                            ),
+                            child: Icon(
+                              _isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
+                              color: Colors.white,
+                              size: 20,
+                            ),
+                          ),
+                        ),
+                      ),
+
+                      // Fullscreen floating quick bar at bottom
+                      if (_isFullscreen)
+                        Positioned(
+                          bottom: 12,
+                          left: 12,
+                          right: 12,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF0F172A).withOpacity(0.88),
+                              borderRadius: BorderRadius.circular(16),
+                              border: Border.all(color: Colors.cyanAccent.withOpacity(0.45)),
+                            ),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceAround,
+                              children: [
+                                IconButton(
+                                  icon: Icon(_isRemoteTouchOn ? Icons.touch_app : Icons.touch_app_outlined,
+                                      color: _isRemoteTouchOn ? Colors.greenAccent : Colors.white),
+                                  onPressed: _toggleRemoteTouch,
+                                ),
+                                IconButton(
+                                  icon: Icon(_isLiveAudioOn ? Icons.volume_up : Icons.volume_off,
+                                      color: _isLiveAudioOn ? Colors.tealAccent : Colors.white),
+                                  onPressed: _toggleLiveAudio,
+                                ),
+                                IconButton(
+                                  icon: const Icon(Icons.camera_alt, color: Colors.lightBlueAccent),
+                                  onPressed: _captureScreenshot,
+                                ),
+                                IconButton(
+                                  icon: const Icon(Icons.notifications_active, color: Colors.amberAccent),
+                                  onPressed: _showBuzzerDialog,
+                                ),
+                                IconButton(
+                                  icon: const Icon(Icons.fullscreen_exit, color: Colors.white),
+                                  onPressed: _toggleFullscreen,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+
+                      // Animated Touch Feedback Ripple under finger
+                      if (_touchFeedbackPos != null)
+                        Positioned(
+                          left: _touchFeedbackPos!.dx - 24,
+                          top: _touchFeedbackPos!.dy - 24,
+                          child: Container(
+                            width: 48,
+                            height: 48,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: Colors.cyanAccent.withOpacity(0.4),
+                              border: Border.all(color: Colors.white, width: 2),
+                              boxShadow: const [
+                                BoxShadow(
+                                  color: Colors.cyanAccent,
+                                  blurRadius: 16,
+                                  spreadRadius: 4,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                    ],
+                  );
+                },
+              )
+            : Center(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(24.0),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        _isConnecting ? Icons.wifi_protected_setup : Icons.tv_off,
+                        size: 58,
+                        color: Colors.white38,
+                      ),
+                      const SizedBox(height: 14),
+                      Text(
+                        _isConnecting
+                            ? 'बच्चे के फोन से सिग्नल की प्रतीक्षा...'
+                            : 'बच्चे का कोड डालकर "कनेक्ट" दबाएं\nया QR स्कैन करें',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: Colors.white70, fontSize: 14),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final bool isSessionConnected = (_isConnected || _hasRemoteVideo) && _remoteRenderer.srcObject != null;
 
+    if (_isFullscreen && isSessionConnected) {
+      return Scaffold(
+        backgroundColor: Colors.black,
+        body: SafeArea(child: _buildVideoFeedArea(isSessionConnected)),
+      );
+    }
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('माता-पिता का लाइव मॉनिटर'),
+        title: const Text('माता-पिता मॉनिटर'),
         backgroundColor: const Color(0xFF1E293B),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.photo_library_outlined, color: Colors.lightBlueAccent),
+            tooltip: 'स्क्रीनशॉट गैलरी (${_capturedSnaps.length})',
+            onPressed: _showScreenshotsGallery,
+          ),
           IconButton(
             icon: const Icon(Icons.cell_tower, color: Colors.cyanAccent),
             tooltip: 'मोबाइल डेटा TURN सेटिंग',
@@ -3104,49 +3826,59 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
         ],
       ),
       body: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(12),
         child: Column(
           children: [
-            // Code Input Row
+            // Code Input Row + QR Scan + Connect
             Row(
               children: [
+                IconButton.filled(
+                  onPressed: _isConnecting ? null : _openQrScanner,
+                  style: IconButton.styleFrom(
+                    backgroundColor: const Color(0xFF0891B2),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  icon: const Icon(Icons.qr_code_scanner, color: Colors.white),
+                  tooltip: 'QR स्कैन करें',
+                ),
+                const SizedBox(width: 8),
                 Expanded(
                   child: TextField(
                     controller: _codeController,
                     textCapitalization: TextCapitalization.characters,
-                    style: const TextStyle(fontWeight: FontWeight.bold, letterSpacing: 2),
+                    style: const TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1.5),
                     decoration: InputDecoration(
-                      labelText: 'बच्चे का कोड (उदा. KID-8429)',
+                      labelText: 'बच्चे का कोड (KID-8429)',
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                     ),
                   ),
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 8),
                 ElevatedButton(
                   onPressed: _isConnecting ? null : _connectToChild,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF4F46E5),
                     foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   ),
                   child: _isConnecting
                       ? const SizedBox(
-                          width: 20,
-                          height: 20,
+                          width: 18,
+                          height: 18,
                           child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                         )
-                      : const Text('कनेक्ट करें', style: TextStyle(fontWeight: FontWeight.bold)),
+                      : const Text('कनेक्ट', style: TextStyle(fontWeight: FontWeight.bold)),
                 ),
               ],
             ),
 
-            const SizedBox(height: 10),
+            const SizedBox(height: 8),
 
             // Diagnostics Bar
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
                 color: const Color(0xFF1E293B),
                 borderRadius: BorderRadius.circular(10),
@@ -3157,61 +3889,58 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
                   Expanded(
                     child: Text(
                       _statusText,
-                      style: const TextStyle(fontSize: 12, color: Colors.cyanAccent),
+                      style: const TextStyle(fontSize: 11, color: Colors.cyanAccent),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
                   Text(
-                    'ICE: $_iceState | Res: $_videoResolution',
+                    'ICE: $_iceState | $_videoResolution',
                     style: const TextStyle(fontSize: 10, color: Colors.white60),
                   ),
                 ],
               ),
             ),
 
-            // ONLY WHEN CONNECTED: Render Remote Touch & Live Audio Controls
+            // FULL PARENT OPTIONS PANEL (Always visible when connected!)
             if (isSessionConnected) ...[
-              const SizedBox(height: 10),
+              const SizedBox(height: 8),
               Container(
-                padding: const EdgeInsets.all(10),
+                padding: const EdgeInsets.all(8),
                 decoration: BoxDecoration(
                   color: const Color(0xFF1E293B),
                   borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: Colors.cyanAccent.withOpacity(0.4)),
+                  border: Border.all(color: Colors.cyanAccent.withOpacity(0.35)),
                 ),
                 child: Column(
                   children: [
                     Row(
                       children: [
-                        // 1. REMOTE TOUCH BUTTON
                         Expanded(
                           child: ElevatedButton.icon(
                             icon: Icon(
                               _isRemoteTouchOn ? Icons.touch_app : Icons.touch_app_outlined,
-                              size: 18,
+                              size: 16,
                               color: Colors.white,
                             ),
                             label: Text(
-                              _isRemoteTouchOn ? '👆 रिमोट टच: चालू' : '👆 रिमोट टच: बंद',
+                              _isRemoteTouchOn ? '👆 टच: चालू' : '👆 टच: बंद',
                               style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
                             ),
                             style: ElevatedButton.styleFrom(
                               backgroundColor: _isRemoteTouchOn ? Colors.green.shade600 : Colors.blueGrey.shade800,
                               foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              padding: const EdgeInsets.symmetric(vertical: 9),
                               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                             ),
                             onPressed: _toggleRemoteTouch,
                           ),
                         ),
                         const SizedBox(width: 8),
-
-                        // 2. LIVE AUDIO ON/OFF BUTTON
                         Expanded(
                           child: ElevatedButton.icon(
                             icon: Icon(
                               _isLiveAudioOn ? Icons.volume_up : Icons.volume_off,
-                              size: 18,
+                              size: 16,
                               color: Colors.white,
                             ),
                             label: Text(
@@ -3221,7 +3950,7 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
                             style: ElevatedButton.styleFrom(
                               backgroundColor: _isLiveAudioOn ? Colors.teal.shade600 : Colors.blueGrey.shade800,
                               foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              padding: const EdgeInsets.symmetric(vertical: 9),
                               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                             ),
                             onPressed: _toggleLiveAudio,
@@ -3229,214 +3958,119 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
                         ),
                       ],
                     ),
-
-                    if (_isLiveAudioOn) ...[
-                      const SizedBox(height: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: Colors.teal.withOpacity(0.2),
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: Colors.tealAccent.withOpacity(0.5)),
-                        ),
-                        child: const Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.graphic_eq, color: Colors.tealAccent, size: 16),
-                            SizedBox(width: 6),
-                            Text(
-                              '🎙️ लाइव ऑडियो सक्रिय — बच्चे के आसपास की आवाज सुनाई दे रही है',
-                              style: TextStyle(fontSize: 11, color: Colors.tealAccent, fontWeight: FontWeight.bold),
-                            ),
-                          ],
-                        ),
+                    const SizedBox(height: 8),
+                    SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          _buildQuickActionChip(
+                            icon: Icons.camera_alt,
+                            label: '📸 स्क्रीनशॉट',
+                            color: Colors.lightBlueAccent,
+                            onTap: _captureScreenshot,
+                          ),
+                          const SizedBox(width: 6),
+                          _buildQuickActionChip(
+                            icon: Icons.photo_library,
+                            label: '🖼️ गैलरी (${_capturedSnaps.length})',
+                            color: Colors.indigoAccent,
+                            onTap: _showScreenshotsGallery,
+                          ),
+                          const SizedBox(width: 6),
+                          _buildQuickActionChip(
+                            icon: Icons.notifications_active,
+                            label: '🔔 अलर्ट भेजें',
+                            color: Colors.amberAccent,
+                            onTap: _showBuzzerDialog,
+                          ),
+                          const SizedBox(width: 6),
+                          _buildQuickActionChip(
+                            icon: Icons.zoom_in,
+                            label: '🔍 ज़ूम ${_zoomLevel}x',
+                            color: Colors.cyanAccent,
+                            onTap: _cycleZoom,
+                          ),
+                          const SizedBox(width: 6),
+                          _buildQuickActionChip(
+                            icon: Icons.fullscreen,
+                            label: '⛶ फुलस्क्रीन',
+                            color: Colors.purpleAccent,
+                            onTap: _toggleFullscreen,
+                          ),
+                        ],
                       ),
-                    ],
-
-                    if (_isRemoteTouchOn) ...[
-                      const SizedBox(height: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: Colors.green.withOpacity(0.2),
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: Colors.greenAccent.withOpacity(0.5)),
-                        ),
-                        child: const Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.ads_click, color: Colors.greenAccent, size: 16),
-                            SizedBox(width: 6),
-                            Text(
-                              'स्क्रीन पर जहां टैप करेंगे, वही कमांड बच्चे के फोन पर जाएगी',
-                              style: TextStyle(fontSize: 11, color: Colors.greenAccent, fontWeight: FontWeight.bold),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
+                    ),
                   ],
                 ),
               ),
             ],
 
-            const SizedBox(height: 10),
+            const SizedBox(height: 8),
 
-            // Video Feed Container with Remote Touch Interaction
-            Expanded(
-              child: Container(
-                width: double.infinity,
-                decoration: BoxDecoration(
-                  color: Colors.black,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(
-                    color: _hasRemoteVideo
-                        ? (_isRemoteTouchOn ? Colors.greenAccent : Colors.cyanAccent.withOpacity(0.5))
-                        : Colors.white24,
-                    width: _isRemoteTouchOn ? 2 : 1,
-                  ),
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(16),
-                  child: isSessionConnected
-                      ? LayoutBuilder(
-                          builder: (context, constraints) {
-                            return Stack(
-                              children: [
-                                SizedBox.expand(
-                                  child: RTCVideoView(
-                                    _remoteRenderer,
-                                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                                  ),
-                                ),
+            // Video Feed Container
+            Expanded(child: _buildVideoFeedArea(isSessionConnected)),
 
-                                // Interactive Gesture Detector for Remote Touch
-                                if (_isRemoteTouchOn)
-                                  Positioned.fill(
-                                    child: GestureDetector(
-                                      behavior: HitTestBehavior.opaque,
-                                      onTapDown: (details) => _handleRemoteScreenTap(details.localPosition, constraints),
-                                      child: Container(
-                                        color: Colors.transparent,
-                                      ),
-                                    ),
-                                  ),
-
-                                // Animated Touch Feedback Ripple under finger
-                                if (_touchFeedbackPos != null)
-                                  Positioned(
-                                    left: _touchFeedbackPos!.dx - 24,
-                                    top: _touchFeedbackPos!.dy - 24,
-                                    child: Container(
-                                      width: 48,
-                                      height: 48,
-                                      decoration: BoxDecoration(
-                                        shape: BoxShape.circle,
-                                        color: Colors.cyanAccent.withOpacity(0.4),
-                                        border: Border.all(color: Colors.white, width: 2),
-                                        boxShadow: const [
-                                          BoxShadow(
-                                            color: Colors.cyanAccent,
-                                            blurRadius: 16,
-                                            spreadRadius: 4,
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ),
-                              ],
-                            );
-                          },
-                        )
-                      : Center(
-                          child: Padding(
-                            padding: const EdgeInsets.all(24.0),
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Icon(
-                                  _isConnecting ? Icons.wifi_protected_setup : Icons.tv_off,
-                                  size: 64,
-                                  color: Colors.white38,
-                                ),
-                                const SizedBox(height: 16),
-                                Text(
-                                  _isConnecting
-                                      ? 'बच्चे के फोन से सिग्नल की प्रतीक्षा...'
-                                      : 'बच्चे का कोड डालकर "कनेक्ट करें" बटन दबाएं',
-                                  textAlign: TextAlign.center,
-                                  style: const TextStyle(color: Colors.white70, fontSize: 14),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                ),
-              ),
-            ),
-
-            // Remote Navigation Control Bar (ONLY when connected & Remote Touch is ON)
-            if (isSessionConnected && _isRemoteTouchOn) ...[
+            // ALWAYS-VISIBLE Remote Navigation Bar when connected
+            if (isSessionConnected) ...[
               const SizedBox(height: 8),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                 decoration: BoxDecoration(
                   color: const Color(0xFF0F172A),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: Colors.greenAccent.withOpacity(0.4)),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: _isRemoteTouchOn ? Colors.greenAccent.withOpacity(0.55) : Colors.white24,
+                  ),
                 ),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceAround,
                   children: [
                     IconButton(
-                      icon: const Icon(Icons.arrow_back, color: Colors.white),
+                      icon: const Icon(Icons.arrow_back, color: Colors.white, size: 20),
                       tooltip: 'पीछे जाएं (Back)',
                       onPressed: () => _sendRemoteNavAction('BACK', 'पीछे जाएं (Back)'),
                     ),
                     IconButton(
-                      icon: const Icon(Icons.circle_outlined, color: Colors.white),
+                      icon: const Icon(Icons.circle_outlined, color: Colors.white, size: 20),
                       tooltip: 'होम स्क्रीन (Home)',
                       onPressed: () => _sendRemoteNavAction('HOME', 'होम स्क्रीन (Home)'),
                     ),
                     IconButton(
-                      icon: const Icon(Icons.crop_square, color: Colors.white),
+                      icon: const Icon(Icons.crop_square, color: Colors.white, size: 20),
                       tooltip: 'हाल के ऐप्स (Recents)',
                       onPressed: () => _sendRemoteNavAction('RECENTS', 'हाल के ऐप्स (Recents)'),
                     ),
                     IconButton(
-                      icon: const Icon(Icons.arrow_upward, color: Colors.white),
+                      icon: const Icon(Icons.arrow_upward, color: Colors.white, size: 20),
                       tooltip: 'ऊपर स्क्रॉल (Scroll Up)',
                       onPressed: () => _sendRemoteNavAction('SCROLL_UP', 'ऊपर स्क्रॉल (Scroll Up)'),
                     ),
                     IconButton(
-                      icon: const Icon(Icons.arrow_downward, color: Colors.white),
+                      icon: const Icon(Icons.arrow_downward, color: Colors.white, size: 20),
                       tooltip: 'नीचे स्क्रॉल (Scroll Down)',
                       onPressed: () => _sendRemoteNavAction('SCROLL_DOWN', 'नीचे स्क्रॉल (Scroll Down)'),
                     ),
                     IconButton(
-                      icon: const Icon(Icons.notifications_active, color: Colors.amberAccent),
+                      icon: const Icon(Icons.notifications_active, color: Colors.amberAccent, size: 20),
                       tooltip: 'अलर्ट घंटी (Buzzer)',
-                      onPressed: () => _sendRemoteNavAction('BUZZER', 'अलर्ट बज़र बज गया'),
+                      onPressed: _showBuzzerDialog,
                     ),
                   ],
                 ),
               ),
-            ],
-
-            const SizedBox(height: 10),
-
-            if (isSessionConnected)
+              const SizedBox(height: 8),
               ElevatedButton.icon(
-                icon: const Icon(Icons.stop, color: Colors.white),
-                label: const Text('डिस्कनेक्ट करें'),
+                icon: const Icon(Icons.stop, color: Colors.white, size: 18),
+                label: const Text('डिस्कनेक्ट करें', style: TextStyle(fontWeight: FontWeight.bold)),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.redAccent,
                   foregroundColor: Colors.white,
-                  minimumSize: const Size.fromHeight(48),
+                  minimumSize: const Size.fromHeight(42),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
                 onPressed: _disconnect,
               ),
+            ],
           ],
         ),
       ),
