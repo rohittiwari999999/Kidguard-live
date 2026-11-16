@@ -1325,6 +1325,8 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> with WidgetsBin
   int _offerCreatedAtMs = 0;
   String _currentOfferId = '';
   String? _currentReplyReqId;
+  String? _latestOfferSdp;
+  String? _latestOfferType;
   bool _isRemoteDescSet = false;
   final Set<String> _handledReqIds = {};
   final Set<String> _handledDisconnectIds = {};
@@ -2114,6 +2116,11 @@ class _ChildScreenCaptureState extends State<ChildScreenCapture> with WidgetsBin
     _actionFeedbackTimer?.cancel();
     _actionFeedbackTimer = null;
     _localLan.stop();
+    _latestOfferSdp = null;
+    _latestOfferType = null;
+    _currentOfferId = '';
+    _currentReplyReqId = null;
+    _offerCreatedAtMs = 0;
     _collectedChildCandidates.clear();
     _outgoingCandidateBuffer.clear();
     _addedRemoteCandidateKeys.clear();
