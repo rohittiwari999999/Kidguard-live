@@ -2897,9 +2897,17 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
   }
 
   void _toggleFullscreen() {
+    final next = !_isFullscreen;
     setState(() {
-      _isFullscreen = !_isFullscreen;
+      _isFullscreen = next;
     });
+    try {
+      if (next) {
+        SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      } else {
+        SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      }
+    } catch (_) {}
   }
 
   Future<void> _captureScreenshot() async {
@@ -3537,6 +3545,9 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     _remoteRenderer.srcObject = null;
     _isRemoteDescSet = false;
     _queuedCandidates.clear();
+    try {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    } catch (_) {}
     if (updateUi && mounted) {
       setState(() {
         _isConnected = false;
@@ -3673,23 +3684,49 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
                         ),
                       ),
 
-                      // Top-right fullscreen toggle overlay
+                      // Top-right Zoom / Fullscreen & Zoom-Out overlay button right on Live Screen
                       Positioned(
                         top: 8,
                         right: 8,
                         child: InkWell(
                           onTap: _toggleFullscreen,
+                          borderRadius: BorderRadius.circular(12),
                           child: Container(
-                            padding: const EdgeInsets.all(6),
+                            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
                             decoration: BoxDecoration(
-                              color: Colors.black.withOpacity(0.68),
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(color: Colors.white24),
+                              color: _isFullscreen
+                                  ? Colors.redAccent.withOpacity(0.88)
+                                  : Colors.indigoAccent.withOpacity(0.88),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: Colors.white.withOpacity(0.75),
+                                width: 1.2,
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.45),
+                                  blurRadius: 8,
+                                ),
+                              ],
                             ),
-                            child: Icon(
-                              _isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                              color: Colors.white,
-                              size: 20,
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  _isFullscreen ? Icons.zoom_in_map : Icons.zoom_out_map,
+                                  color: Colors.white,
+                                  size: 17,
+                                ),
+                                const SizedBox(width: 5),
+                                Text(
+                                  _isFullscreen ? 'ज़ूम आउट' : 'ज़ूम (फुल स्क्रीन)',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ),
@@ -3704,7 +3741,7 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
                           child: Container(
                             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                             decoration: BoxDecoration(
-                              color: const Color(0xFF0F172A).withOpacity(0.88),
+                              color: const Color(0xFF0F172A).withOpacity(0.9),
                               borderRadius: BorderRadius.circular(16),
                               border: Border.all(color: Colors.cyanAccent.withOpacity(0.45)),
                             ),
@@ -3714,24 +3751,43 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
                                 IconButton(
                                   icon: Icon(_isRemoteTouchOn ? Icons.touch_app : Icons.touch_app_outlined,
                                       color: _isRemoteTouchOn ? Colors.greenAccent : Colors.white),
+                                  tooltip: 'रिमोट टच',
                                   onPressed: _toggleRemoteTouch,
                                 ),
                                 IconButton(
                                   icon: Icon(_isLiveAudioOn ? Icons.volume_up : Icons.volume_off,
                                       color: _isLiveAudioOn ? Colors.tealAccent : Colors.white),
+                                  tooltip: 'ऑडियो',
                                   onPressed: _toggleLiveAudio,
                                 ),
                                 IconButton(
                                   icon: const Icon(Icons.camera_alt, color: Colors.lightBlueAccent),
+                                  tooltip: 'स्क्रीनशॉट',
                                   onPressed: _captureScreenshot,
                                 ),
                                 IconButton(
                                   icon: const Icon(Icons.notifications_active, color: Colors.amberAccent),
+                                  tooltip: 'अलर्ट',
                                   onPressed: _showBuzzerDialog,
                                 ),
-                                IconButton(
-                                  icon: const Icon(Icons.fullscreen_exit, color: Colors.white),
-                                  onPressed: _toggleFullscreen,
+                                InkWell(
+                                  onTap: _toggleFullscreen,
+                                  borderRadius: BorderRadius.circular(10),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                    decoration: BoxDecoration(
+                                      color: Colors.redAccent.withOpacity(0.85),
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                    child: const Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(Icons.zoom_in_map, color: Colors.white, size: 16),
+                                        SizedBox(width: 4),
+                                        Text('ज़ूम आउट', style: TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold)),
+                                      ],
+                                    ),
+                                  ),
                                 ),
                               ],
                             ),
@@ -3796,9 +3852,21 @@ class _ParentLiveMonitorState extends State<ParentLiveMonitor> {
     final bool isSessionConnected = (_isConnected || _hasRemoteVideo) && _remoteRenderer.srcObject != null;
 
     if (_isFullscreen && isSessionConnected) {
-      return Scaffold(
-        backgroundColor: Colors.black,
-        body: SafeArea(child: _buildVideoFeedArea(isSessionConnected)),
+      return PopScope(
+        canPop: false,
+        onPopInvoked: (didPop) {
+          if (!didPop && _isFullscreen) {
+            _toggleFullscreen();
+          }
+        },
+        child: Scaffold(
+          backgroundColor: Colors.black,
+          body: SafeArea(
+            top: false,
+            bottom: false,
+            child: _buildVideoFeedArea(isSessionConnected),
+          ),
+        ),
       );
     }
 

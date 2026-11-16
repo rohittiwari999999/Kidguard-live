@@ -338,17 +338,30 @@ export const ParentView: React.FC<ParentViewProps> = ({
     }, 1500);
   };
 
-  // Toggle Fullscreen
+  // Sync isFullscreen with browser fullscreen state
+  useEffect(() => {
+    const onFsChange = () => {
+      if (!document.fullscreenElement) {
+        setIsFullscreen(false);
+      }
+    };
+    document.addEventListener('fullscreenchange', onFsChange);
+    return () => document.removeEventListener('fullscreenchange', onFsChange);
+  }, []);
+
+  // Toggle Fullscreen (uses Native Fullscreen API + CSS fixed-inset fallback for iFrame/iOS)
   const toggleFullscreen = () => {
     const container = videoContainerRef.current;
-    if (!container) return;
-
-    if (!document.fullscreenElement) {
-      container.requestFullscreen?.().catch(() => {});
+    if (!isFullscreen) {
       setIsFullscreen(true);
+      if (container && !document.fullscreenElement) {
+        container.requestFullscreen?.().catch(() => {});
+      }
     } else {
-      document.exitFullscreen?.().catch(() => {});
       setIsFullscreen(false);
+      if (document.fullscreenElement) {
+        document.exitFullscreen?.().catch(() => {});
+      }
     }
   };
 
@@ -547,7 +560,11 @@ export const ParentView: React.FC<ParentViewProps> = ({
         <div className="mt-4">
           <div
             ref={videoContainerRef}
-            className={`relative rounded-2xl overflow-hidden bg-black aspect-video max-h-[520px] w-full flex items-center justify-center border shadow-2xl group ${
+            className={`${
+              isFullscreen
+                ? 'fixed inset-0 z-50 w-screen h-screen rounded-none'
+                : 'relative rounded-2xl aspect-video max-h-[520px] w-full'
+            } overflow-hidden bg-black flex items-center justify-center border shadow-2xl group ${
               isRemoteTouchOn ? 'border-emerald-500/60 ring-2 ring-emerald-500/20' : 'border-slate-800'
             }`}
           >
@@ -630,28 +647,47 @@ export const ParentView: React.FC<ParentViewProps> = ({
               </button>
             )}
 
-            {/* Floating Top Status (When Live) */}
+            {/* Floating Top Status & Live Screen Zoom/Zoom-Out Button (When Live) */}
             {hasStream && (
-              <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none z-10">
-                <div className="flex items-center gap-2 bg-black/60 backdrop-blur-md px-3 py-1 rounded-full border border-white/10 text-white text-xs pointer-events-auto">
+              <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none z-30">
+                <div className="flex items-center gap-2 bg-black/65 backdrop-blur-md px-3 py-1.5 rounded-xl border border-white/15 text-white text-xs pointer-events-auto">
                   <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
                   <span className="font-bold tracking-wider text-[11px] text-red-400 uppercase">LIVE</span>
                   <span className="text-slate-400">•</span>
                   <span className="font-mono text-[11px]">{formatDuration(streamDuration)}</span>
                 </div>
 
-                {isRecording && (
-                  <div className="flex items-center gap-1.5 bg-rose-600/90 text-white text-xs px-3 py-1 rounded-full font-bold animate-pulse">
-                    <span className="w-2 h-2 rounded-full bg-white" />
-                    REC
-                  </div>
-                )}
+                <div className="flex items-center gap-2 pointer-events-auto">
+                  {isRecording && (
+                    <div className="flex items-center gap-1.5 bg-rose-600/90 text-white text-xs px-3 py-1 rounded-xl font-bold animate-pulse">
+                      <span className="w-2 h-2 rounded-full bg-white" />
+                      REC
+                    </div>
+                  )}
+
+                  <button
+                    onClick={toggleFullscreen}
+                    title={isFullscreen ? 'ज़ूम आउट करें' : 'फुल स्क्रीन ज़ूम करें'}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white border shadow-lg transition active:scale-95 cursor-pointer ${
+                      isFullscreen
+                        ? 'bg-rose-600/95 hover:bg-rose-500 border-white/60'
+                        : 'bg-indigo-600/90 hover:bg-indigo-500 border-white/50'
+                    }`}
+                  >
+                    {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
+                    <span>
+                      {isFullscreen
+                        ? (lang === 'hi' ? 'ज़ूम आउट' : 'Zoom Out')
+                        : (lang === 'hi' ? 'ज़ूम (फुल स्क्रीन)' : 'Zoom Fullscreen')}
+                    </span>
+                  </button>
+                </div>
               </div>
             )}
 
             {/* In-Player Bottom Control Overlay */}
             {hasStream && (
-              <div className="absolute bottom-3 left-3 right-3 bg-slate-950/80 backdrop-blur-md border border-slate-800 px-4 py-2.5 rounded-2xl flex items-center justify-between gap-3 text-slate-200 transition opacity-90 hover:opacity-100 shadow-xl">
+              <div className="absolute bottom-3 left-3 right-3 z-30 bg-slate-950/85 backdrop-blur-md border border-slate-800 px-4 py-2.5 rounded-2xl flex items-center justify-between gap-3 text-slate-200 transition opacity-95 hover:opacity-100 shadow-xl">
                 {/* Left: Quick Snapshot & Record */}
                 <div className="flex items-center gap-2">
                   <button
@@ -714,13 +750,18 @@ export const ParentView: React.FC<ParentViewProps> = ({
                     {isAudioMuted ? <VolumeX className="w-4 h-4 text-rose-400" /> : <Volume2 className="w-4 h-4 text-emerald-400 animate-pulse" />}
                   </button>
 
-                  {/* Fullscreen */}
+                  {/* Fullscreen Zoom / Zoom-Out */}
                   <button
                     onClick={toggleFullscreen}
-                    title={t.fullscreen}
-                    className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 transition"
+                    title={isFullscreen ? 'Zoom Out' : t.fullscreen}
+                    className={`px-2.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1 transition cursor-pointer ${
+                      isFullscreen
+                        ? 'bg-rose-600 hover:bg-rose-500 text-white'
+                        : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                    }`}
                   >
                     {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
+                    <span className="hidden sm:inline">{isFullscreen ? (lang === 'hi' ? 'ज़ूम आउट' : 'Zoom Out') : (lang === 'hi' ? 'फुल स्क्रीन' : 'Full')}</span>
                   </button>
                 </div>
               </div>
